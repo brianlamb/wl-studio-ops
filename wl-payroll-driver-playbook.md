@@ -16,9 +16,12 @@ Panel actions:
 - **Highlight**: mark fixable/manual rows directly in the report table.
 - **Manual tabs**: open only rows that need human review, such as `Pure Bliss Staff`,
   appointments, and events.
-- **Roster tabs**: open roster links for attendance rows with unresolved booked gaps.
+- **Roster tabs**: open roster links for attendance rows with unresolved booked gaps. In
+  Violentmonkey, these open in background tabs via `GM_openInTab`.
 - **Set `<rate>`**: guarded per-row Quick Substitution pay-rate fix. Each click shows a native
   confirmation dialog with staff/date/class/rate context before changing anything.
+- **Skip fix confirm**: disables the native confirmation dialog so `Set <rate>` immediately runs
+  the Quick Substitution operation.
 - **Reload**: reload the report after fixes so the table pulls fresh server-side data.
 
 The console API remains available as `window.WLPayrollDriver`, so Claude/Chrome automation can
@@ -34,6 +37,10 @@ WLPayrollDriver.openReconciliationTabs()
 This should not be an all-or-nothing automation. Keep the deterministic scanning and UI element
 operations in the userscript, but keep pay-rate changes as user-invoked, confirmed actions until
 the workflow has been validated across several payroll periods.
+
+Row targeting uses `k_class_period` from the report Details/Booked URLs when available. This
+matters when two rows share the same staff, date/time, and class title, such as a normal booking
+row plus a zero-booking duplicate.
 
 ## Console/Claude setup (per session)
 

@@ -4,8 +4,9 @@
 // @match       *://www.wellnessliving.com/rs/report-view.html*
 // @match       *://www.wellnessliving.com/Wl/Staff/Pay/Report/StaffPaySummaryReport.html*
 // @match       *://www.wellnessliving.com/Wl/Staff/Pay/Report/StaffPayDetailReport.html*
-// @grant       none
-// @version     1.1.0
+// @grant       GM_openInTab
+// @grant       unsafeWindow
+// @version     1.2.1
 // @description Payroll Details audit, review, and guarded pay-rate fixing for WellnessLiving
 // ==/UserScript==
 
@@ -24,10 +25,12 @@
  * the confirm buttons asynchronously after Quick Substitution is triggered; if
  * you combine trigger + confirm in one call, the click silently fails.
  *
- * Version: 1.1.0
+ * Version: 1.2.1
  */
 (function () {
   'use strict';
+
+  const PAGE = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
 
   // -- Selectors (data-name attributes are stable across WL column reorders) --
   const COL = {
@@ -60,11 +63,49 @@
   const slug = (s) => s.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40);
   const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
+  function getCellActionUrl(row, name) {
+    const cell = getCell(row, name);
+    if (!cell) return '';
+    const source = cell.matches('[data-url-click], [data-url-hover], a[href]')
+      ? cell
+      : cell.querySelector('[data-url-click], [data-url-hover], a[href]');
+    return source?.getAttribute('data-url-click') ||
+      source?.getAttribute('data-url-hover') ||
+      source?.getAttribute('href') ||
+      '';
+  }
+
+  function getUrlParam(rawUrl, param) {
+    if (!rawUrl) return '';
+    try {
+      const normalized = rawUrl.replace(/&amp;/g, '&');
+      return new URL(normalized, location.origin).searchParams.get(param) || '';
+    } catch (e) {
+      const match = rawUrl.replace(/&amp;/g, '&').match(new RegExp(`[?&]${param}=([^&]+)`));
+      return match ? decodeURIComponent(match[1].replace(/\+/g, ' ')) : '';
+    }
+  }
+
+  function getRowPeriod(row) {
+    return getUrlParam(getCellActionUrl(row, COL.details), 'k_class_period') ||
+      getUrlParam(getCellActionUrl(row, COL.booked), 'k_class_period');
+  }
+
+  function getRowIdentity(row) {
+    const period = getRowPeriod(row);
+    if (period) return `period-${period}`;
+    const uid = getCell(row, COL.staff)?.querySelector('[data-uid]')?.getAttribute('data-uid') ||
+      row.querySelector('[data-uid]')?.getAttribute('data-uid') ||
+      '';
+    const rowIndex = row.parentElement ? Array.prototype.indexOf.call(row.parentElement.children, row) : row.rowIndex;
+    return `row-${uid || 'unknown'}-${rowIndex}`;
+  }
+
   function makeRowKey(row) {
     const staff = getText(row, COL.staff);
     const date  = getText(row, COL.date);
     const det   = getText(row, COL.details);
-    return `${slug(staff)}|${slug(date)}|${slug(det)}`;
+    return `${slug(staff)}|${slug(date)}|${slug(det)}|${getRowIdentity(row)}`;
   }
 
   function classifyRow(row) {
@@ -110,6 +151,7 @@
 
     return {
       key: makeRowKey(row),
+      period: getRowPeriod(row) || null,
       staff, serviceType, payRate: payRate || '(blank)', details, date,
       expected: expected?.label || null,
       expectedKeyword: expected?.keyword || null,
@@ -126,8 +168,18 @@
     return getDataRows().find(row => makeRowKey(row) === rowKey) || null;
   }
 
-  function openAnchorInTab(anchor) {
+  function openAnchorInTab(anchor, options = {}) {
     if (!anchor) return false;
+    const href = anchor.href;
+    const active = options.active !== false;
+    if (href && typeof GM_openInTab === 'function') {
+      GM_openInTab(href, {
+        active,
+        insert: true,
+        setParent: true,
+      });
+      return true;
+    }
     const originalTarget = anchor.target;
     anchor.target = '_blank';
     try {
@@ -138,9 +190,33 @@
     }
   }
 
+  function getVisibleClassPopup() {
+    const isVisible = (el) => {
+      if (!el) return false;
+      let cur = el;
+      while (cur && cur !== document.body) {
+        const s = window.getComputedStyle(cur);
+        if (s.display === 'none' || s.visibility === 'hidden') return false;
+        cur = cur.parentElement;
+      }
+      return true;
+    };
+    const popups = Array.from(document.querySelectorAll('.css-sg-second.rs-class-view-ti, .css-sg-second.rs-class-view-tip, [class*="rs-class-view"]'))
+      .filter(isVisible);
+    return popups[popups.length - 1] || null;
+  }
+
+  function getOpenPopupPeriod() {
+    const popup = getVisibleClassPopup();
+    if (!popup) return '';
+    return popup.querySelector('[data-period]')?.getAttribute('data-period') ||
+      getUrlParam(popup.querySelector('a[href*="k_class_period"]')?.getAttribute('href') || '', 'k_class_period') ||
+      '';
+  }
+
   // -- Public API --
   const API = {
-    version: '1.1.0',
+    version: '1.2.1',
 
     /** Read-only: classify every row on the current page. */
     scan() {
@@ -238,10 +314,9 @@
     },
 
     /**
-     * Open each reconciliation row's class roster in a new tab. Modifies each
-     * Booked-column anchor to target="_blank" and triggers a click so the browser
-     * treats it as a real anchor activation (less likely to popup-block than
-     * window.open). Restores target afterwards.
+     * Open each reconciliation row's class roster in a background tab when the
+     * userscript manager exposes GM_openInTab. Falls back to anchor activation,
+     * which may focus the new tab depending on browser settings.
      *
      * Returns count of tabs opened. First call after page load usually requires
      * popups allowed for wellnessliving.com; if blocked, browser shows the popup
@@ -264,16 +339,15 @@
 
         const link = getCell(row, COL.booked)?.querySelector('a');
         if (!link) return;
-        const originalTarget = link.target;
-        link.target = '_blank';
         try {
-          link.click();
-          opened++;
-          opens.push({ staff, details: getText(row, COL.details).slice(0, 50), date: getText(row, COL.date) });
+          if (openAnchorInTab(link, { active: false })) {
+            opened++;
+            opens.push({ staff, details: getText(row, COL.details).slice(0, 50), date: getText(row, COL.date) });
+          } else {
+            blocked++;
+          }
         } catch (e) {
           blocked++;
-        } finally {
-          link.target = originalTarget;
         }
       });
       return { ok: true, opened, blocked, opens };
@@ -313,7 +387,7 @@
       if (!row) return { ok: false, error: `no row matching key: ${rowKey}` };
       const link = getCell(row, COL.booked)?.querySelector('a');
       if (!link) return { ok: false, error: 'no booked/roster link in row' };
-      return { ok: true, opened: openAnchorInTab(link), key: rowKey };
+      return { ok: true, opened: openAnchorInTab(link, { active: false }), key: rowKey };
     },
 
     /**
@@ -383,12 +457,13 @@
         `Staff:    ${row.staff || '(unknown)'}`,
         `Class:    ${row.details || '(unknown)'}`,
         `Date:     ${row.date || '(unknown)'}`,
+        row.period ? `Period:   ${row.period}` : null,
         `Current:  ${row.payRate || '(blank)'}`,
         `Set to:   ${row.expected || '(unknown)'}`,
         '',
         'Click OK to apply this fix.',
         'Click Cancel to skip this row.',
-      ].join('\n');
+      ].filter(Boolean).join('\n');
       return confirm(msg);
     },
 
@@ -455,16 +530,16 @@
       const quickSub = Array.from(container.querySelectorAll('li')).find(li =>
         (li.getAttribute('data-title') || '').toUpperCase().includes('QUICK'));
       if (!quickSub) return { ok: false, error: 'QUICK Substitution menu item not found' };
-      if (!window.Wl_Classes || typeof window.Wl_Classes.quickStaffChangeShow !== 'function') {
+      if (!PAGE.Wl_Classes || typeof PAGE.Wl_Classes.quickStaffChangeShow !== 'function') {
         return { ok: false, error: 'Wl_Classes.quickStaffChangeShow not available — page may not be fully loaded' };
       }
       try {
         // Close the gear menu first (mimics the onclick string's a_grid_gear_show(...,'hide'))
-        if (typeof window.a_grid_gear_show === 'function') {
-          window.a_grid_gear_show(`rs-staff_substitution-view-${visitId}`, 'hide');
+        if (typeof PAGE.a_grid_gear_show === 'function') {
+          PAGE.a_grid_gear_show(`rs-staff_substitution-view-${visitId}`, 'hide');
         }
         // Then reveal the edit panel
-        window.Wl_Classes.quickStaffChangeShow(quickSub);
+        PAGE.Wl_Classes.quickStaffChangeShow(quickSub);
       } catch (e) {
         return { ok: false, error: 'Wl_Classes.quickStaffChangeShow threw: ' + e.message };
       }
@@ -475,7 +550,7 @@
      * Verification step: is the apply (.js-button-apply > button.css-fa--check) now visible?
      */
     isConfirmReady() {
-      const popup = document.querySelector('.css-sg-second.rs-class-view-ti, [class*="rs-class-view"]');
+      const popup = getVisibleClassPopup();
       if (!popup) return { ok: false, error: 'popup not present' };
       const applyWrap = popup.querySelector('.js-button-apply');
       if (!applyWrap) return { ok: true, ready: false, reason: 'no .js-button-apply element' };
@@ -492,7 +567,7 @@
      * Pass the keyword from the cascade (e.g. 'community', 'hybrid', 'aerial', '75', '45-60').
      */
     selectPayRate(keyword) {
-      const popup = document.querySelector('.css-sg-second.rs-class-view-ti, [class*="rs-class-view"]');
+      const popup = getVisibleClassPopup();
       const selects = popup ? popup.querySelectorAll('select') : document.querySelectorAll('select');
       const paySelect = Array.from(selects).find(s => s.name === 'k_staff_pay');
       if (!paySelect) return { ok: false, error: 'k_staff_pay select not found — form not ready?' };
@@ -520,7 +595,7 @@
      * The correct target is the checkmark button INSIDE .js-button-apply.
      */
     confirm() {
-      const popup = document.querySelector('.css-sg-second.rs-class-view-ti, [class*="rs-class-view"]');
+      const popup = getVisibleClassPopup();
       if (!popup) return { ok: false, error: 'popup not present' };
       const applyWrap = popup.querySelector('.js-button-apply');
       if (!applyWrap) return { ok: false, error: '.js-button-apply not found — triggerQuickSub did not complete?' };
@@ -555,9 +630,22 @@
      * @param {string} keyword - one of 'community', 'hybrid', 'aerial', '75', '45-60'
      */
     async fixRow(rowKey, keyword) {
+      const row = getRowByKey(rowKey);
+      const expectedPeriod = row ? getRowPeriod(row) : '';
       const open = this.openRow(rowKey);
       if (!open.ok) return { phase: 'open', key: rowKey, ...open };
       await sleep(800);
+      const actualPeriod = getOpenPopupPeriod();
+      if (expectedPeriod && actualPeriod && actualPeriod !== expectedPeriod) {
+        return {
+          ok: false,
+          phase: 'verify-popup',
+          key: rowKey,
+          expectedPeriod,
+          actualPeriod,
+          error: `opened popup period ${actualPeriod}, expected ${expectedPeriod}`,
+        };
+      }
       const id = this.findSubContainerId();
       if (!id.ok) return { phase: 'find', key: rowKey, ...id };
       const trig = this.triggerQuickSub(id.id);
@@ -603,7 +691,27 @@
     id: 'wl-payroll-driver-panel',
     styleId: 'wl-payroll-driver-style',
     lastScan: null,
+    settings: {
+      skipFixConfirm: loadSetting('skipFixConfirm', false),
+    },
   };
+
+  function loadSetting(name, fallback) {
+    try {
+      const value = localStorage.getItem(`WLPayrollDriver.${name}`);
+      return value === null ? fallback : value === 'true';
+    } catch (e) {
+      return fallback;
+    }
+  }
+
+  function saveSetting(name, value) {
+    try {
+      localStorage.setItem(`WLPayrollDriver.${name}`, value ? 'true' : 'false');
+    } catch (e) {
+      // Ignore storage failures; the checkbox still controls this page session.
+    }
+  }
 
   function escapeHtml(value) {
     return String(value ?? '').replace(/[&<>"']/g, ch => ({
@@ -679,6 +787,14 @@
       #${UI.id} .wlpd-title { font-weight: 700; }
       #${UI.id} .wlpd-actions,
       #${UI.id} .wlpd-counts { flex-wrap: wrap; }
+      #${UI.id} .wlpd-option {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        color: #334155;
+        white-space: nowrap;
+      }
+      #${UI.id} .wlpd-option input { margin: 0; }
       #${UI.id} .wlpd-pill {
         border-radius: 999px;
         padding: 2px 8px;
@@ -759,6 +875,7 @@
         <div class="wlpd-issue" data-category="${escapeHtml(row.category)}" data-key="${escapeHtml(row.key)}">
           <div class="wlpd-main">${escapeHtml(row.staff)} - ${escapeHtml(row.date)}</div>
           <div class="wlpd-meta">${escapeHtml(row.details)}</div>
+          ${row.period ? `<div class="wlpd-meta">Class period ${escapeHtml(row.period)}</div>` : ''}
           <div class="wlpd-meta">${escapeHtml(row.issue || '')}</div>
           <div class="wlpd-row-actions" style="margin-top:7px;">
             <button data-action="open" data-key="${escapeHtml(row.key)}">Open</button>
@@ -829,7 +946,7 @@
     }
     if (action === 'reconcile-tabs') {
       const result = API.openReconciliationTabs();
-      notifyPanel(`Opened ${result.opened} roster tabs.`);
+      notifyPanel(`Opened ${result.opened} roster tabs in background.`);
       return;
     }
     if (action === 'refresh') {
@@ -853,7 +970,7 @@
     }
     if (action === 'roster' && key) {
       const result = API.openRosterTab(key);
-      notifyPanel(result.ok ? 'Opened roster tab.' : result.error, result.ok ? 'info' : 'error');
+      notifyPanel(result.ok ? 'Opened roster tab in background.' : result.error, result.ok ? 'info' : 'error');
       return;
     }
     if (action === 'fix' && key) {
@@ -862,7 +979,7 @@
         notifyPanel('Could not find row in current scan.', 'error');
         return;
       }
-      if (!API.confirmBeforeFix(item)) {
+      if (!UI.settings.skipFixConfirm && !API.confirmBeforeFix(item)) {
         notifyPanel('Skipped fix.');
         return;
       }
@@ -875,6 +992,18 @@
         return;
       }
       notifyPanel(`Fix saved: ${result.selected}. Reload before final verification.`, 'warn');
+    }
+  }
+
+  function onPanelChange(event) {
+    const input = event.target.closest('input[data-setting]');
+    if (!input) return;
+    if (input.dataset.setting === 'skip-fix-confirm') {
+      UI.settings.skipFixConfirm = input.checked;
+      saveSetting('skipFixConfirm', UI.settings.skipFixConfirm);
+      notifyPanel(UI.settings.skipFixConfirm
+        ? 'Fix confirmation is disabled.'
+        : 'Fix confirmation is enabled.');
     }
   }
 
@@ -900,6 +1029,10 @@
             <button data-action="manual-tabs">Manual tabs</button>
             <button data-action="reconcile-tabs">Roster tabs</button>
             <button data-action="refresh">Reload</button>
+            <label class="wlpd-option">
+              <input type="checkbox" data-setting="skip-fix-confirm" ${UI.settings.skipFixConfirm ? 'checked' : ''}>
+              Skip fix confirm
+            </label>
           </div>
           <div class="wlpd-counts"></div>
           <div class="wlpd-status">Ready. Run Scan after the Payroll Details report has loaded.</div>
@@ -907,6 +1040,7 @@
         </div>
       `;
       panel.addEventListener('click', onPanelClick);
+      panel.addEventListener('change', onPanelChange);
       document.body.appendChild(panel);
     }
     if (options.autoScan) runPanelScan();
@@ -918,6 +1052,7 @@
   API.notify = notifyPanel;
 
   window.WLPayrollDriver = API;
+  PAGE.WLPayrollDriver = API;
   console.log(`%cWLPayrollDriver v${API.version} loaded`, 'color: #0a7; font-weight: bold');
   console.log('Available methods:', Object.keys(API).filter(k => typeof API[k] === 'function'));
 
