@@ -1,11 +1,11 @@
 # WL Payroll Driver — Chrome MCP Orchestration Playbook
 
 How Claude or a human operator drives the monthly Pure Bliss Yoga payroll audit using
-`wl-payroll-driver.js`.
+`wl-payroll-driver.user.js`.
 
 ## Recommended mode: Violentmonkey operator panel
 
-`wl-payroll-driver.js` is now also a userscript. Install the file contents as a
+`wl-payroll-driver.user.js` is a userscript. Install the file contents as a
 Violentmonkey/Tampermonkey script, then open an already-run WellnessLiving Payroll Details
 report. A floating **WL Payroll Driver** panel should appear automatically.
 
@@ -40,7 +40,7 @@ the workflow has been validated across several payroll periods.
 1. User opens the Payroll Details report in Chrome and navigates to the period being audited.
 2. Claude verifies the Chrome MCP extension is connected (`list_connected_browsers`).
 3. Claude injects the driver library via `javascript_tool` — paste the entire contents of
-   `wl-payroll-driver.js`. Verify the load message in the console.
+   `wl-payroll-driver.user.js`. Verify the load message in the console.
 4. Driver lives on `window.WLPayrollDriver` for the remainder of the session.
 
 ## Phase 1: Scan-only audit (single page)
