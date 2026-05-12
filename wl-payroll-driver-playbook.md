@@ -1,9 +1,41 @@
 # WL Payroll Driver — Chrome MCP Orchestration Playbook
 
-How Claude drives the monthly Pure Bliss Yoga payroll audit via Chrome MCP using
+How Claude or a human operator drives the monthly Pure Bliss Yoga payroll audit using
 `wl-payroll-driver.js`.
 
-## Setup (per session)
+## Recommended mode: Violentmonkey operator panel
+
+`wl-payroll-driver.js` is now also a userscript. Install the file contents as a
+Violentmonkey/Tampermonkey script, then open an already-run WellnessLiving Payroll Details
+report. A floating **WL Payroll Driver** panel should appear automatically.
+
+Panel actions:
+
+- **Scan**: classify the currently visible report rows, run attendance reconciliation checks,
+  and populate the issue list.
+- **Highlight**: mark fixable/manual rows directly in the report table.
+- **Manual tabs**: open only rows that need human review, such as `Pure Bliss Staff`,
+  appointments, and events.
+- **Roster tabs**: open roster links for attendance rows with unresolved booked gaps.
+- **Set `<rate>`**: guarded per-row Quick Substitution pay-rate fix. Each click shows a native
+  confirmation dialog with staff/date/class/rate context before changing anything.
+- **Reload**: reload the report after fixes so the table pulls fresh server-side data.
+
+The console API remains available as `window.WLPayrollDriver`, so Claude/Chrome automation can
+still call the same primitives when needed:
+
+```js
+WLPayrollDriver.runPanelScan()
+WLPayrollDriver.highlightIssues()
+WLPayrollDriver.openManualReviewTabs()
+WLPayrollDriver.openReconciliationTabs()
+```
+
+This should not be an all-or-nothing automation. Keep the deterministic scanning and UI element
+operations in the userscript, but keep pay-rate changes as user-invoked, confirmed actions until
+the workflow has been validated across several payroll periods.
+
+## Console/Claude setup (per session)
 
 1. User opens the Payroll Details report in Chrome and navigates to the period being audited.
 2. Claude verifies the Chrome MCP extension is connected (`list_connected_browsers`).
