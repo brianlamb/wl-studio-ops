@@ -260,7 +260,7 @@
     /**
      * Read-only: attendance reconciliation check using the canonical tooltip.
      *
-     * Semantics (matches Brian's reconcile_attendance.user.js workflow):
+     * Semantics (matches previous reconcile_attendance.user.js workflow):
      *   - errors: rows where Attended+NoShows+LateCx > Booked (impossible over-count — real data bug)
      *   - needsReconciliation: rows where Booked > sum. NOT necessarily wrong — the gap
      *     represents unresolved check-in status (could be attended/no-show/other unmarked).
