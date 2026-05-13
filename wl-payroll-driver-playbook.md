@@ -42,6 +42,10 @@ Row targeting uses `k_class_period` from the report Details/Booked URLs when ava
 matters when two rows share the same staff, date/time, and class title, such as a normal booking
 row plus a zero-booking duplicate.
 
+Pay-rate fixes now commit through the same `Wl\Classes\Period\Staff\Ajax::staffSubstituteSave`
+method that the Quick Substitution apply button calls. The button-click path remains as a fallback,
+but the primary path avoids bubbling click events that can close the popup before the save settles.
+
 ## Console/Claude setup (per session)
 
 1. User opens the Payroll Details report in Chrome and navigates to the period being audited.

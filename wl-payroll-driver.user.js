@@ -6,7 +6,7 @@
 // @match       *://www.wellnessliving.com/Wl/Staff/Pay/Report/StaffPayDetailReport.html*
 // @grant       GM_openInTab
 // @grant       unsafeWindow
-// @version     1.2.1
+// @version     1.3.0
 // @description Payroll Details audit, review, and guarded pay-rate fixing for WellnessLiving
 // ==/UserScript==
 
@@ -25,7 +25,7 @@
  * the confirm buttons asynchronously after Quick Substitution is triggered; if
  * you combine trigger + confirm in one call, the click silently fails.
  *
- * Version: 1.2.1
+ * Version: 1.3.0
  */
 (function () {
   'use strict';
@@ -214,9 +214,14 @@
       '';
   }
 
+  function pageQuery(el) {
+    const jq = PAGE.jQuery || PAGE.$;
+    return typeof jq === 'function' ? jq(el) : null;
+  }
+
   // -- Public API --
   const API = {
-    version: '1.2.1',
+    version: '1.3.0',
 
     /** Read-only: classify every row on the current page. */
     scan() {
@@ -582,9 +587,114 @@
         };
       }
       paySelect.value = target.value;
+      target.selected = true;
       paySelect.dispatchEvent(new Event('change', { bubbles: true }));
       paySelect.dispatchEvent(new Event('input',  { bubbles: true }));
+      const jqSelect = pageQuery(paySelect);
+      if (jqSelect) {
+        jqSelect.val(target.value).trigger('change').trigger('input');
+        if (PAGE.Core_Html_Select?.update) PAGE.Core_Html_Select.update(jqSelect);
+      }
+      if (paySelect.value !== target.value) {
+        return {
+          ok: false,
+          error: `pay select did not retain value "${target.value}"`,
+          selectedValue: paySelect.value,
+          expectedValue: target.value,
+        };
+      }
       return { ok: true, selected: target.text, value: target.value };
+    },
+
+    /**
+     * Commit Quick Substitution through the same AJAX endpoint WL's apply button
+     * uses, without dispatching a bubbling click that can close the popup first.
+     */
+    saveQuickSubDirect(expectedPayValue = null) {
+      const popup = getVisibleClassPopup();
+      if (!popup) return Promise.resolve({ ok: false, error: 'popup not present' });
+      if (!PAGE.AAjax || typeof PAGE.AAjax.method !== 'function') {
+        return Promise.resolve({ ok: false, error: 'AAjax.method not available' });
+      }
+
+      const staffContainer = popup.querySelector('.js-staff-container');
+      if (!staffContainer) return Promise.resolve({ ok: false, error: '.js-staff-container not found' });
+      const shownStaff = staffContainer.querySelector('.js-single-staff-block.js-show');
+      const currentStaff = shownStaff?.getAttribute('data-staff') || '';
+      const currentPeriod = shownStaff?.getAttribute('data-period') || getOpenPopupPeriod();
+      if (!currentPeriod) return Promise.resolve({ ok: false, error: 'could not determine class period for save' });
+
+      const holder = staffContainer.querySelector(`.js-class-quick-holder--${currentPeriod}-${currentStaff}`) ||
+        Array.from(staffContainer.querySelectorAll('.js-class-quick-one-holder')).find(el =>
+          el.querySelector('select[name="k_staff"]')?.getAttribute('data-period') === currentPeriod);
+      if (!holder) return Promise.resolve({ ok: false, error: 'quick substitution holder not found' });
+
+      const staffSelect = holder.querySelector('select[name="k_staff"]');
+      const paySelect = holder.querySelector('select[name="k_staff_pay"]');
+      if (!staffSelect) return Promise.resolve({ ok: false, error: 'k_staff select not found' });
+      if (!paySelect) return Promise.resolve({ ok: false, error: 'k_staff_pay select not found' });
+      if (expectedPayValue && paySelect.value !== expectedPayValue) {
+        return Promise.resolve({
+          ok: false,
+          error: `pay select value mismatch before save: expected ${expectedPayValue}, got ${paySelect.value || '(blank)'}`,
+          expectedPayValue,
+          actualPayValue: paySelect.value,
+        });
+      }
+
+      const staffPayload = Array.from(staffContainer.querySelectorAll('.js-class-quick-one-holder')).map(item => {
+        const kStaff = item.querySelector('select[name="k_staff"]');
+        const kStaffPay = item.querySelector('select[name="k_staff_pay"]');
+        return {
+          k_staff: kStaff?.value || '',
+          k_staff_pay: kStaffPay?.value || '',
+          uid_staff: kStaff?.selectedOptions?.[0]?.getAttribute('data-uid') || '',
+        };
+      }).filter(item => item.k_staff);
+
+      return new Promise(resolve => {
+        let settled = false;
+        const finish = (result) => {
+          if (settled) return;
+          settled = true;
+          resolve(result);
+        };
+        try {
+          PAGE.AAjax.method({
+            a_data: {
+              a_staff: staffPayload,
+              dt_date_local: staffContainer.getAttribute('data-date') || '',
+              k_class_period: currentPeriod,
+            },
+            call_success(_sender, response) {
+              const status = response?.s_status || response?.status || '';
+              if (status === 'ok') {
+                const selectedPay = paySelect.selectedOptions?.[0];
+                const staffName = staffSelect.selectedOptions?.[0]?.textContent?.trim() || '';
+                const payTitle = selectedPay?.getAttribute('data-title') || selectedPay?.textContent?.trim() || '';
+                shownStaff?.querySelector('.js-service-popup-staff-name')?.replaceChildren(document.createTextNode(staffName));
+                shownStaff?.querySelector('.js-service-popup-staff-pay-name')?.replaceChildren(document.createTextNode(payTitle));
+                staffSelect.dataset.staff = staffSelect.value;
+                staffSelect.dataset.pay = paySelect.value;
+                holder.querySelector('.js-buttons-container')?.style.setProperty('display', 'none');
+                finish({ ok: true, status, period: currentPeriod, selected: payTitle, value: paySelect.value });
+              } else {
+                holder.querySelector('.js-buttons-container')?.style.removeProperty('display');
+                finish({ ok: false, error: `save returned status "${status || 'unknown'}"`, response });
+              }
+            },
+            call_fail(_sender, response) {
+              holder.querySelector('.js-buttons-container')?.style.removeProperty('display');
+              finish({ ok: false, error: 'save request failed', response });
+            },
+            is_overlay: true,
+            s_method: 'Wl\\Classes\\Period\\Staff\\Ajax::staffSubstituteSave',
+          });
+        } catch (e) {
+          finish({ ok: false, error: `AAjax save threw: ${e.message}` });
+        }
+        setTimeout(() => finish({ ok: false, error: 'save request timed out' }), 12000);
+      });
     },
 
     /**
@@ -604,9 +714,12 @@
       }
       const btn = applyWrap.querySelector('button.css-fa--check, button');
       if (!btn) return { ok: false, error: 'no button inside .js-button-apply' };
-      btn.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
-      btn.dispatchEvent(new MouseEvent('mouseup',   { bubbles: true, cancelable: true }));
-      btn.dispatchEvent(new MouseEvent('click',     { bubbles: true, cancelable: true }));
+      const jqButton = pageQuery(btn);
+      if (jqButton) {
+        jqButton.triggerHandler('click');
+      } else {
+        btn.dispatchEvent(new MouseEvent('click', { bubbles: false, cancelable: true }));
+      }
       return { ok: true, clicked: true };
     },
 
@@ -653,10 +766,25 @@
       await sleep(300);
       const sel = this.selectPayRate(keyword);
       if (!sel.ok) return { phase: 'select', key: rowKey, visitId: id.id, ...sel };
-      const conf = this.confirm();
-      if (!conf.ok) return { phase: 'confirm', key: rowKey, visitId: id.id, ...conf };
-      await sleep(500);
-      return { ok: true, key: rowKey, visitId: id.id, selected: sel.selected };
+      await sleep(150);
+      const direct = await this.saveQuickSubDirect(sel.value);
+      if (!direct.ok && direct.error !== 'AAjax.method not available') {
+        return { phase: 'save', key: rowKey, visitId: id.id, selected: sel.selected, ...direct };
+      }
+      if (!direct.ok) {
+        const conf = this.confirm();
+        if (!conf.ok) return { phase: 'confirm', key: rowKey, visitId: id.id, ...conf };
+      }
+      await sleep(800);
+      const toast = this.checkSuccessToast();
+      return {
+        ok: true,
+        key: rowKey,
+        visitId: id.id,
+        selected: direct.selected || sel.selected,
+        saveMode: direct.ok ? 'direct-ajax' : 'button-fallback',
+        toast,
+      };
     },
 
     /**
