@@ -198,8 +198,8 @@ if (quickSub) quickSub.onclick.call(quickSub, new MouseEvent('click'));
 **Critical — run this as a SEPARATE call and wait for it to complete before proceeding.**
 WellnessLiving shows the confirm buttons asynchronously after the onclick fires. The buttons
 start as `display:none / visibility:hidden` and are revealed by WL's JS after a tick. If you
-combine trigger + confirm in the same call the button will appear reachable but clicks are
-silently ignored, causing a "Selected date does not belong to class period" error on save.
+combine trigger + confirm in the same call the button can appear reachable while the form is not
+ready, which can cause a silent failed save or a stale popup interaction.
 
 Verify the form is ready before moving to 2d:
 
@@ -275,7 +275,7 @@ from the pay-rate fixes.
 |---|---|---|
 | Popup closes the moment you click anything in it | Event bubbling hits document outside-click handler | Use `li.onclick.call(...)` instead of dispatching click events |
 | 3-dots button reports `offsetParent === null` | CSS `:hover` hides it; JS mouseover doesn't trigger CSS hover | Skip clicking 3-dots — go straight to the dropdown container |
-| "Selected date does not belong to class period" error | Confirm button clicked while still `visibility:hidden` — WL renders buttons async after Quick Sub onclick | Run 2c in a separate call, verify `visibility === 'visible'` before running 2e |
+| "Selected date does not belong to class period" error | Popup date and selected row date/class period do not match, often from a stale popup on recurring classes | Close the popup, rescan, and retry; the driver should verify both `k_class_period` and `dt_date` before saving |
 | Two sets of 3-dots visible in popup | Top-right ⋮ = class-level actions; inline ⋮ = staff pay substitution | Always target `[id*="staff_substitution"]` |
 | Table sorts unexpectedly after fix | Pagination click lands on column header | After page navigation re-sort by clicking the Staff column header, or use `document.querySelector('td.css-column--o_staff_member').click()` |
 | Report shows stale data after fix | Page was not refreshed | `location.reload()` then re-run checker |

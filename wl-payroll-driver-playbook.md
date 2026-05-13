@@ -48,9 +48,9 @@ This should not be an all-or-nothing automation. Keep the deterministic scanning
 operations in the userscript, but keep pay-rate changes as user-invoked, confirmed actions until
 the workflow has been validated across several payroll periods.
 
-Row targeting uses `k_class_period` from the report Details/Booked URLs when available. This
-matters when two rows share the same staff, date/time, and class title, such as a normal booking
-row plus a zero-booking duplicate.
+Row targeting uses `k_class_period` plus `dt_date` from the report Details/Booked URLs when
+available. Both values matter: recurring classes can reuse the same display title/staff and may
+have multiple payroll rows, while the Quick Substitution save rejects a period/date mismatch.
 
 Pay-rate fixes now commit through the same `Wl\Classes\Period\Staff\Ajax::staffSubstituteSave`
 method that the Quick Substitution apply button calls. The button-click path remains as a fallback,
@@ -158,7 +158,8 @@ Report back to user:
 | `selectPayRate` returns "select not found" | Quick Sub form not yet rendered — step 4 verification skipped | Re-run `isConfirmReady`, wait, retry |
 | `selectPayRate` returns "no option matching keyword" — see availableOptions in error | WL rate option text changed | Update CASCADE keywords in driver |
 | `confirm` returns "no visible primary button" | Same async render race — confirm called too early | Verify `isConfirmReady` returns `ready: true` before calling |
-| Confirm clicks but no success toast | "Selected date does not belong to class period" error from WL — same async race | Step 4 was probably skipped; retry the whole fix from step 1 |
+| Fix fails with `opened popup date ... expected ...` | WL kept or reopened a stale class popup for a different recurring date | Close the popup, rescan, and retry the row; the driver blocks the save before calling WL |
+| Save returns `class-period-date-out` / "Selected date does not belong to class period" | The popup date and selected row date do not match the class period being saved | Rescan after reload; row identity must include both `k_class_period` and `dt_date` |
 
 ## Next steps for this driver
 

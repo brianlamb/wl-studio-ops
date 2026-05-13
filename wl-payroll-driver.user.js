@@ -10,7 +10,7 @@
 // @match       *://www.wellnessliving.com/Wl/Staff/Pay/Report/StaffPayDetailReport.html*
 // @grant       GM_openInTab
 // @grant       unsafeWindow
-// @version     1.3.2
+// @version     1.3.3
 // @description Payroll Details audit, review, and guarded pay-rate fixing for WellnessLiving
 // ==/UserScript==
 
@@ -29,7 +29,7 @@
  * the confirm buttons asynchronously after Quick Substitution is triggered; if
  * you combine trigger + confirm in one call, the click silently fails.
  *
- * Version: 1.3.2
+ * Version: 1.3.3
  */
 (function () {
   'use strict';
@@ -102,8 +102,21 @@
       getUrlParam(getCellActionUrl(row, COL.booked), 'k_class_period');
   }
 
+  function normalizeDateLocal(value) {
+    return String(value || '').trim().replace('T', ' ').replace(/\s+/g, ' ');
+  }
+
+  function getRowDateLocal(row) {
+    return normalizeDateLocal(
+      getUrlParam(getCellActionUrl(row, COL.details), 'dt_date') ||
+      getUrlParam(getCellActionUrl(row, COL.booked), 'dt_date')
+    );
+  }
+
   function getRowIdentity(row) {
     const period = getRowPeriod(row);
+    const dateLocal = getRowDateLocal(row);
+    if (period && dateLocal) return `period-${period}-${slug(dateLocal)}`;
     if (period) return `period-${period}`;
     const uid = getCell(row, COL.staff)?.querySelector('[data-uid]')?.getAttribute('data-uid') ||
       row.querySelector('[data-uid]')?.getAttribute('data-uid') ||
@@ -163,6 +176,7 @@
     return {
       key: makeRowKey(row),
       period: getRowPeriod(row) || null,
+      dateLocal: getRowDateLocal(row) || null,
       staff, serviceType, payRate: payRate || '(blank)', details, date,
       expected: expected?.label || null,
       expectedKeyword: expected?.keyword || null,
@@ -225,6 +239,28 @@
       '';
   }
 
+  function getOpenPopupDateLocal() {
+    const popup = getVisibleClassPopup();
+    if (!popup) return '';
+    return normalizeDateLocal(
+      popup.querySelector('.js-staff-container')?.getAttribute('data-date') ||
+      getUrlParam(popup.querySelector('a[href*="dt_date="]')?.getAttribute('href') || '', 'dt_date')
+    );
+  }
+
+  function closeVisibleClassPopup() {
+    if (!getVisibleClassPopup()) return;
+    try {
+      if (typeof PAGE.a_popup_box_hide === 'function') {
+        PAGE.a_popup_box_hide();
+        return;
+      }
+    } catch (e) {
+      // Fall through to DOM close button.
+    }
+    getVisibleClassPopup()?.querySelector('.css-fa--times')?.click();
+  }
+
   function pageQuery(el) {
     const jq = PAGE.jQuery || PAGE.$;
     return typeof jq === 'function' ? jq(el) : null;
@@ -232,7 +268,7 @@
 
   // -- Public API --
   const API = {
-    version: '1.3.2',
+    version: '1.3.3',
 
     /** Read-only: classify every row on the current page. */
     scan() {
@@ -500,6 +536,7 @@
       if (!target) return { ok: false, error: `no row matching key: ${rowKey}` };
       const link = getCell(target, COL.details)?.querySelector('a');
       if (!link) return { ok: false, error: 'no details link in row' };
+      closeVisibleClassPopup();
       link.click();
       return { ok: true, opened: rowKey };
     },
@@ -624,7 +661,7 @@
      * Commit Quick Substitution through the same AJAX endpoint WL's apply button
      * uses, without dispatching a bubbling click that can close the popup first.
      */
-    saveQuickSubDirect(expectedPayValue = null) {
+    saveQuickSubDirect(expectedPayValue = null, expectedDateLocal = null) {
       const popup = getVisibleClassPopup();
       if (!popup) return Promise.resolve({ ok: false, error: 'popup not present' });
       if (!PAGE.AAjax || typeof PAGE.AAjax.method !== 'function') {
@@ -637,6 +674,16 @@
       const currentStaff = shownStaff?.getAttribute('data-staff') || '';
       const currentPeriod = shownStaff?.getAttribute('data-period') || getOpenPopupPeriod();
       if (!currentPeriod) return Promise.resolve({ ok: false, error: 'could not determine class period for save' });
+      const popupDateLocal = getOpenPopupDateLocal();
+      const dateLocal = normalizeDateLocal(expectedDateLocal || popupDateLocal || staffContainer.getAttribute('data-date'));
+      if (expectedDateLocal && popupDateLocal && normalizeDateLocal(expectedDateLocal) !== popupDateLocal) {
+        return Promise.resolve({
+          ok: false,
+          error: `popup date mismatch before save: expected ${normalizeDateLocal(expectedDateLocal)}, got ${popupDateLocal}`,
+          expectedDateLocal: normalizeDateLocal(expectedDateLocal),
+          popupDateLocal,
+        });
+      }
 
       const holder = staffContainer.querySelector(`.js-class-quick-holder--${currentPeriod}-${currentStaff}`) ||
         Array.from(staffContainer.querySelectorAll('.js-class-quick-one-holder')).find(el =>
@@ -677,7 +724,7 @@
           PAGE.AAjax.method({
             a_data: {
               a_staff: staffPayload,
-              dt_date_local: staffContainer.getAttribute('data-date') || '',
+              dt_date_local: dateLocal,
               k_class_period: currentPeriod,
             },
             call_success(_sender, response) {
@@ -691,7 +738,7 @@
                 staffSelect.dataset.staff = staffSelect.value;
                 staffSelect.dataset.pay = paySelect.value;
                 holder.querySelector('.js-buttons-container')?.style.setProperty('display', 'none');
-                finish({ ok: true, status, period: currentPeriod, selected: payTitle, value: paySelect.value });
+                finish({ ok: true, status, period: currentPeriod, dateLocal, selected: payTitle, value: paySelect.value });
               } else {
                 holder.querySelector('.js-buttons-container')?.style.removeProperty('display');
                 finish({ ok: false, error: `save returned status "${status || 'unknown'}"`, response });
@@ -759,10 +806,12 @@
     async fixRow(rowKey, keyword) {
       const row = getRowByKey(rowKey);
       const expectedPeriod = row ? getRowPeriod(row) : '';
+      const expectedDateLocal = row ? getRowDateLocal(row) : '';
       const open = this.openRow(rowKey);
       if (!open.ok) return { phase: 'open', key: rowKey, ...open };
       await sleep(800);
       const actualPeriod = getOpenPopupPeriod();
+      const actualDateLocal = getOpenPopupDateLocal();
       if (expectedPeriod && actualPeriod && actualPeriod !== expectedPeriod) {
         return {
           ok: false,
@@ -773,6 +822,16 @@
           error: `opened popup period ${actualPeriod}, expected ${expectedPeriod}`,
         };
       }
+      if (expectedDateLocal && actualDateLocal && actualDateLocal !== expectedDateLocal) {
+        return {
+          ok: false,
+          phase: 'verify-popup',
+          key: rowKey,
+          expectedDateLocal,
+          actualDateLocal,
+          error: `opened popup date ${actualDateLocal}, expected ${expectedDateLocal}`,
+        };
+      }
       const id = this.findSubContainerId();
       if (!id.ok) return { phase: 'find', key: rowKey, ...id };
       const trig = this.triggerQuickSub(id.id);
@@ -781,7 +840,7 @@
       const sel = this.selectPayRate(keyword);
       if (!sel.ok) return { phase: 'select', key: rowKey, visitId: id.id, ...sel };
       await sleep(150);
-      const direct = await this.saveQuickSubDirect(sel.value);
+      const direct = await this.saveQuickSubDirect(sel.value, expectedDateLocal);
       if (!direct.ok && direct.error !== 'AAjax.method not available') {
         return { phase: 'save', key: rowKey, visitId: id.id, selected: sel.selected, ...direct };
       }
@@ -1017,7 +1076,7 @@
         <div class="wlpd-issue" data-category="${escapeHtml(row.category)}" data-key="${escapeHtml(row.key)}">
           <div class="wlpd-main">${escapeHtml(row.staff)} - ${escapeHtml(row.date)}</div>
           <div class="wlpd-meta">${escapeHtml(row.details)}</div>
-          ${row.period ? `<div class="wlpd-meta">Class period ${escapeHtml(row.period)}</div>` : ''}
+          ${row.period ? `<div class="wlpd-meta">Class period ${escapeHtml(row.period)}${row.dateLocal ? ` / ${escapeHtml(row.dateLocal)}` : ''}</div>` : ''}
           <div class="wlpd-meta">${escapeHtml(row.issue || '')}</div>
           <div class="wlpd-row-actions" style="margin-top:7px;">
             <button data-action="open" data-key="${escapeHtml(row.key)}">Open</button>
