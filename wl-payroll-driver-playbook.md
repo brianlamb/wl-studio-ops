@@ -5,9 +5,19 @@ How Claude or a human operator drives the monthly Pure Bliss Yoga payroll audit 
 
 ## Recommended mode: Violentmonkey operator panel
 
-`wl-payroll-driver.user.js` is a userscript. Install the file contents as a
-Violentmonkey/Tampermonkey script, then open an already-run WellnessLiving Payroll Details
-report. A floating **WL Payroll Driver** panel should appear automatically.
+`wl-payroll-driver.user.js` is a userscript. Install it in Violentmonkey/Tampermonkey from:
+
+```text
+https://raw.githubusercontent.com/brianlamb/wl-studio-ops/main/wl-payroll-driver.user.js
+```
+
+The userscript header includes `@downloadURL` and `@updateURL` pointing at that raw GitHub file,
+so future committed/pushed version bumps are eligible for normal userscript-manager updates.
+If you previously installed a local copy with the old namespace, delete that copy and install
+from the raw URL so the manager tracks the GitHub-backed script.
+
+Then open an already-run WellnessLiving Payroll Details report. A floating **WL Payroll Driver**
+panel should appear automatically.
 
 Panel actions:
 

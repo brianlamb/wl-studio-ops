@@ -1,12 +1,16 @@
 // ==UserScript==
 // @name        WL Payroll Driver
-// @namespace   Pure Bliss Yoga
+// @namespace   https://github.com/brianlamb/wl-studio-ops
+// @homepageURL https://github.com/brianlamb/wl-studio-ops
+// @supportURL  https://github.com/brianlamb/wl-studio-ops/issues
+// @downloadURL https://raw.githubusercontent.com/brianlamb/wl-studio-ops/main/wl-payroll-driver.user.js
+// @updateURL   https://raw.githubusercontent.com/brianlamb/wl-studio-ops/main/wl-payroll-driver.user.js
 // @match       *://www.wellnessliving.com/rs/report-view.html*
 // @match       *://www.wellnessliving.com/Wl/Staff/Pay/Report/StaffPaySummaryReport.html*
 // @match       *://www.wellnessliving.com/Wl/Staff/Pay/Report/StaffPayDetailReport.html*
 // @grant       GM_openInTab
 // @grant       unsafeWindow
-// @version     1.3.0
+// @version     1.3.1
 // @description Payroll Details audit, review, and guarded pay-rate fixing for WellnessLiving
 // ==/UserScript==
 
@@ -25,7 +29,7 @@
  * the confirm buttons asynchronously after Quick Substitution is triggered; if
  * you combine trigger + confirm in one call, the click silently fails.
  *
- * Version: 1.3.0
+ * Version: 1.3.1
  */
 (function () {
   'use strict';
