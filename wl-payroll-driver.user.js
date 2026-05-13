@@ -10,7 +10,7 @@
 // @match       *://www.wellnessliving.com/Wl/Staff/Pay/Report/StaffPayDetailReport.html*
 // @grant       GM_openInTab
 // @grant       unsafeWindow
-// @version     1.3.1
+// @version     1.3.2
 // @description Payroll Details audit, review, and guarded pay-rate fixing for WellnessLiving
 // ==/UserScript==
 
@@ -29,7 +29,7 @@
  * the confirm buttons asynchronously after Quick Substitution is triggered; if
  * you combine trigger + confirm in one call, the click silently fails.
  *
- * Version: 1.3.1
+ * Version: 1.3.2
  */
 (function () {
   'use strict';
@@ -57,6 +57,13 @@
     { test: dl => dl.includes('community'),                    keyword: 'community', label: 'Community Rate' },
     { test: dl => dl.startsWith('stream:'),                    keyword: 'hybrid',    label: 'Livestream (Hybrid) Rate' },
     { test: dl => dl.includes('aerial'),                       keyword: 'aerial',    label: 'Aerial Rate' },
+    {
+      test: dl => dl.includes('ashtanga'),
+      keyword: '75-90',
+      label: '75-90 minute In-Person Class (500 ERYT)',
+      payRateTest: prl => prl.includes('75-90') && prl.includes('500') && prl.includes('eryt'),
+      optionTest: optionText => optionText.includes('75-90') && optionText.includes('500') && optionText.includes('eryt'),
+    },
     { test: dl => dl.includes('75min') || dl.includes('75 min'), keyword: '75',      label: '75 min In-Person Class' },
     { test: () => true,                                        keyword: '45-60',     label: '45-60 minute In-Person Class' },
   ];
@@ -145,7 +152,7 @@
       category = 'fixable';
       severity = 'error';
       issue = `BLANK pay rate — should be: "${expected.label}"`;
-    } else if (expected && !prl.includes(expected.keyword)) {
+    } else if (expected && !(matched.payRateTest ? matched.payRateTest(prl) : prl.includes(expected.keyword))) {
       category = 'fixable';
       severity = 'error';
       issue = `Wrong rate — expected "${expected.label}", is: "${payRate}"`;
@@ -225,7 +232,7 @@
 
   // -- Public API --
   const API = {
-    version: '1.3.0',
+    version: '1.3.2',
 
     /** Read-only: classify every row on the current page. */
     scan() {
@@ -573,7 +580,7 @@
 
     /**
      * Step 2d: select the correct pay rate from the dropdown.
-     * Pass the keyword from the cascade (e.g. 'community', 'hybrid', 'aerial', '75', '45-60').
+     * Pass the keyword from the cascade (e.g. 'community', 'hybrid', 'aerial', '75-90', '75', '45-60').
      */
     selectPayRate(keyword) {
       const popup = getVisibleClassPopup();
@@ -581,8 +588,11 @@
       const paySelect = Array.from(selects).find(s => s.name === 'k_staff_pay');
       if (!paySelect) return { ok: false, error: 'k_staff_pay select not found — form not ready?' };
 
-      const target = Array.from(paySelect.options).find(o =>
-        o.text.toLowerCase().includes(keyword.toLowerCase()));
+      const rule = CASCADE.find(item => item.keyword === keyword);
+      const target = Array.from(paySelect.options).find(o => {
+        const optionText = o.text.toLowerCase();
+        return rule?.optionTest ? rule.optionTest(optionText) : optionText.includes(keyword.toLowerCase());
+      });
       if (!target) {
         return {
           ok: false,
@@ -744,7 +754,7 @@
      * Recommended over manually chaining the individual primitives.
      *
      * @param {string} rowKey - from scan().rows[].key
-     * @param {string} keyword - one of 'community', 'hybrid', 'aerial', '75', '45-60'
+     * @param {string} keyword - one of 'community', 'hybrid', 'aerial', '75-90', '75', '45-60'
      */
     async fixRow(rowKey, keyword) {
       const row = getRowByKey(rowKey);

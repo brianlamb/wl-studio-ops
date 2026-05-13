@@ -14,8 +14,9 @@ Payroll Details report in WellnessLiving.
 | 1 | Details contains `community` | `Community Rate` |
 | 2 | Details starts with `Stream:` | `Livestream (Hybrid) Rate` |
 | 3 | Details contains `aerial` | `Aerial Rate` |
-| 4 | Details contains `75min` / `75 min` | `75 min In-Person Class` |
-| 5 | Default (everything else) | `45-60 minute In-Person Class` |
+| 4 | Details contains `ashtanga` | `75-90 minute In-Person Class (500 ERYT)` |
+| 5 | Details contains `75min` / `75 min` | `75 min In-Person Class` |
+| 6 | Default (everything else) | `45-60 minute In-Person Class` |
 
 **ERYT variants** of any in-person rate (e.g. `45-60 minute In-Person Class (500HR E-RYT Teacher)`) are legitimate for certified instructors and still pass the keyword match.
 
@@ -29,6 +30,7 @@ Payroll Details report in WellnessLiving.
 - Community beats Stream and Aerial. A `Stream: Community Flow` row gets Community Rate, not Hybrid Rate.
 - Stream beats Aerial. A hybrid aerial class (if any exist) would get Hybrid Rate, not Aerial Rate.
 - Aerial beats length rules. `EDGEWTR: Aerial` gets Aerial Rate, not 45-60 or 75 min — location prefix doesn't preclude aerial.
+- Ashtanga beats generic length rules. Ashtanga should use `75-90 minute In-Person Class (500 ERYT)`.
 
 ---
 
@@ -90,6 +92,7 @@ window._checkPayRates = function() {
     const isCommunity          = dl.includes('community');
     const isLivestream         = dl.startsWith('stream:');
     const isAerial             = dl.includes('aerial');
+    const isAshtanga           = dl.includes('ashtanga');
     const is75min              = dl.includes('75min') || dl.includes('75 min');
 
     // Priority cascade: first match wins (only meaningful for Service Type = 'Class')
@@ -97,6 +100,7 @@ window._checkPayRates = function() {
     if (isCommunity)       { expectedKeyword = 'community';  expectedLabel = 'Community Rate'; }
     else if (isLivestream) { expectedKeyword = 'hybrid';     expectedLabel = 'Livestream (Hybrid) Rate'; }
     else if (isAerial)     { expectedKeyword = 'aerial';     expectedLabel = 'Aerial Rate'; }
+    else if (isAshtanga)   { expectedKeyword = '75-90';      expectedLabel = '75-90 minute In-Person Class (500 ERYT)'; }
     else if (is75min)      { expectedKeyword = '75';         expectedLabel = '75 min In-Person Class'; }
     else                   { expectedKeyword = '45-60';      expectedLabel = '45-60 minute In-Person Class'; }
 
@@ -220,6 +224,7 @@ const paySelect = Array.from(selects).find(s => s.name === 'k_staff_pay');
 //   Aerial     → 'aerial'
 //   Community  → 'community'
 //   Livestream → 'livestream'
+//   Ashtanga   → '75-90'
 //   75 min     → '75'
 //   45-60 min  → '45-60'
 const target = Array.from(paySelect.options).find(o =>
