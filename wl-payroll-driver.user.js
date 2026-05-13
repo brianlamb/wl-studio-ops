@@ -10,7 +10,7 @@
 // @match       *://www.wellnessliving.com/Wl/Staff/Pay/Report/StaffPayDetailReport.html*
 // @grant       GM_openInTab
 // @grant       unsafeWindow
-// @version     1.3.4
+// @version     1.4.0
 // @description Payroll Details audit, review, and guarded pay-rate fixing for WellnessLiving
 // ==/UserScript==
 
@@ -29,7 +29,7 @@
  * the confirm buttons asynchronously after Quick Substitution is triggered; if
  * you combine trigger + confirm in one call, the click silently fails.
  *
- * Version: 1.3.4
+ * Version: 1.4.0
  */
 (function () {
   'use strict';
@@ -266,9 +266,55 @@
     return typeof jq === 'function' ? jq(el) : null;
   }
 
+  // -- Fix log (audit + phantom-row investigation) --
+  // Every fix attempt and save payload is recorded so we can correlate userscript
+  // actions with database state if phantom rows reappear. Persisted to localStorage,
+  // capped to MAX_ENTRIES to avoid bloat.
+  const FIX_LOG = {
+    entries: [],
+    max: 200,
+    storageKey: 'WLPayrollDriver.fixLog',
+    push(entry) {
+      const event = { ts: new Date().toISOString(), ...entry };
+      this.entries.push(event);
+      if (this.entries.length > this.max) this.entries.splice(0, this.entries.length - this.max);
+      try { localStorage.setItem(this.storageKey, JSON.stringify(this.entries)); } catch (e) { /* quota or disabled */ }
+      return event;
+    },
+    load() {
+      try {
+        const stored = JSON.parse(localStorage.getItem(this.storageKey) || '[]');
+        if (Array.isArray(stored)) this.entries = stored.slice(-this.max);
+      } catch (e) { /* corrupt or disabled */ }
+    },
+    clear() {
+      this.entries = [];
+      try { localStorage.removeItem(this.storageKey); } catch (e) {}
+    },
+  };
+  FIX_LOG.load();
+
+  // Snapshot of popup state for diagnosing phantom-row bugs. Captures the
+  // attributes the save payload is built from so we can spot mismatches.
+  function capturePopupSnapshot() {
+    const popup = getVisibleClassPopup();
+    if (!popup) return { popupPresent: false };
+    const staffContainer = popup.querySelector('.js-staff-container');
+    const shownStaff = staffContainer?.querySelector('.js-single-staff-block.js-show');
+    return {
+      popupPresent: true,
+      popupPeriod: getOpenPopupPeriod(),
+      popupDateLocal: getOpenPopupDateLocal(),
+      staffContainerDataDate: staffContainer?.getAttribute('data-date') || null,
+      shownStaffDataPeriod: shownStaff?.getAttribute('data-period') || null,
+      shownStaffDataStaff: shownStaff?.getAttribute('data-staff') || null,
+      shownStaffDataDate: shownStaff?.getAttribute('data-date') || null,
+    };
+  }
+
   // -- Public API --
   const API = {
-    version: '1.3.4',
+    version: '1.4.0',
 
     /** Read-only: classify every row on the current page. */
     scan() {
@@ -668,7 +714,7 @@
      * Commit Quick Substitution through the same AJAX endpoint WL's apply button
      * uses, without dispatching a bubbling click that can close the popup first.
      */
-    saveQuickSubDirect(expectedPayValue = null, expectedDateLocal = null) {
+    saveQuickSubDirect(expectedPayValue = null, expectedDateLocal = null, expectedPeriod = null) {
       const popup = getVisibleClassPopup();
       if (!popup) return Promise.resolve({ ok: false, error: 'popup not present' });
       if (!PAGE.AAjax || typeof PAGE.AAjax.method !== 'function') {
@@ -682,15 +728,34 @@
       const currentPeriod = shownStaff?.getAttribute('data-period') || getOpenPopupPeriod();
       if (!currentPeriod) return Promise.resolve({ ok: false, error: 'could not determine class period for save' });
       const popupDateLocal = getOpenPopupDateLocal();
-      const dateLocal = normalizeDateLocal(expectedDateLocal || popupDateLocal || staffContainer.getAttribute('data-date'));
-      if (expectedDateLocal && popupDateLocal && normalizeDateLocal(expectedDateLocal) !== popupDateLocal) {
-        return Promise.resolve({
-          ok: false,
-          error: `popup date mismatch before save: expected ${normalizeDateLocal(expectedDateLocal)}, got ${popupDateLocal}`,
-          expectedDateLocal: normalizeDateLocal(expectedDateLocal),
-          popupDateLocal,
-        });
+      const popupPeriod = getOpenPopupPeriod();
+      const normalizedExpected = normalizeDateLocal(expectedDateLocal);
+
+      // Strict guards to prevent phantom DB rows from mismatched (period, date)
+      // upserts. The WL endpoint creates a NEW payroll record when the (period,
+      // date) PK doesn't exist. Refuse to save unless every value is known and
+      // matches — no fallback to staffContainer data-date for the payload.
+      const refuse = (error, extras) => {
+        const result = { ok: false, error, currentPeriod, ...extras };
+        FIX_LOG.push({ phase: 'save-refused', ...result, snapshot: capturePopupSnapshot() });
+        return Promise.resolve(result);
+      };
+      if (!normalizedExpected) {
+        return refuse('save refused: expectedDateLocal required (call via fixRow, not direct)');
       }
+      if (!popupDateLocal) {
+        return refuse('save refused: popup date unreadable (popup may not be fully rendered)', { expectedDateLocal: normalizedExpected });
+      }
+      if (normalizedExpected !== popupDateLocal) {
+        return refuse(`save refused: popup date mismatch — expected ${normalizedExpected}, got ${popupDateLocal}`, { expectedDateLocal: normalizedExpected, popupDateLocal });
+      }
+      if (expectedPeriod && currentPeriod !== expectedPeriod) {
+        return refuse(`save refused: popup period mismatch — expected ${expectedPeriod}, got ${currentPeriod}`, { expectedPeriod });
+      }
+      if (popupPeriod && currentPeriod !== popupPeriod) {
+        return refuse(`save refused: internal period mismatch — shown staff ${currentPeriod}, popup ${popupPeriod}`, { popupPeriod });
+      }
+      const dateLocal = normalizedExpected;
 
       const holder = staffContainer.querySelector(`.js-class-quick-holder--${currentPeriod}-${currentStaff}`) ||
         Array.from(staffContainer.querySelectorAll('.js-class-quick-one-holder')).find(el =>
@@ -720,20 +785,24 @@
         };
       }).filter(item => item.k_staff);
 
+      const payload = {
+        a_staff: staffPayload,
+        dt_date_local: dateLocal,
+        k_class_period: currentPeriod,
+      };
+      FIX_LOG.push({ phase: 'save-payload', payload, snapshot: capturePopupSnapshot() });
+
       return new Promise(resolve => {
         let settled = false;
         const finish = (result) => {
           if (settled) return;
           settled = true;
+          FIX_LOG.push({ phase: 'save-result', ok: result.ok, error: result.error || null, status: result.status || null, period: currentPeriod, dateLocal });
           resolve(result);
         };
         try {
           PAGE.AAjax.method({
-            a_data: {
-              a_staff: staffPayload,
-              dt_date_local: dateLocal,
-              k_class_period: currentPeriod,
-            },
+            a_data: payload,
             call_success(_sender, response) {
               const status = response?.s_status || response?.status || '';
               if (status === 'ok') {
@@ -814,6 +883,7 @@
       const row = getRowByKey(rowKey);
       const expectedPeriod = row ? getRowPeriod(row) : '';
       const expectedDateLocal = row ? getRowDateLocal(row) : '';
+      FIX_LOG.push({ phase: 'fix-start', rowKey, keyword, expectedPeriod, expectedDateLocal });
       const open = this.openRow(rowKey);
       if (!open.ok) return { phase: 'open', key: rowKey, ...open };
       await sleep(800);
@@ -847,16 +917,22 @@
       const sel = this.selectPayRate(keyword);
       if (!sel.ok) return { phase: 'select', key: rowKey, visitId: id.id, ...sel };
       await sleep(150);
-      const direct = await this.saveQuickSubDirect(sel.value, expectedDateLocal);
+      const direct = await this.saveQuickSubDirect(sel.value, expectedDateLocal, expectedPeriod);
       if (!direct.ok && direct.error !== 'AAjax.method not available') {
-        return { phase: 'save', key: rowKey, visitId: id.id, selected: sel.selected, ...direct };
+        const failed = { phase: 'save', key: rowKey, visitId: id.id, selected: sel.selected, ...direct };
+        FIX_LOG.push({ phase: 'fix-end', rowKey, keyword, ok: false, error: direct.error });
+        return failed;
       }
       if (!direct.ok) {
         const conf = this.confirm();
-        if (!conf.ok) return { phase: 'confirm', key: rowKey, visitId: id.id, ...conf };
+        if (!conf.ok) {
+          FIX_LOG.push({ phase: 'fix-end', rowKey, keyword, ok: false, error: conf.error });
+          return { phase: 'confirm', key: rowKey, visitId: id.id, ...conf };
+        }
       }
       await sleep(800);
       const toast = this.checkSuccessToast();
+      FIX_LOG.push({ phase: 'fix-end', rowKey, keyword, ok: true, saveMode: direct.ok ? 'direct-ajax' : 'button-fallback', selected: direct.selected || sel.selected });
       return {
         ok: true,
         key: rowKey,
@@ -884,6 +960,19 @@
         }
       }
       return { ok: true, found: false };
+    },
+
+    // -- Fix log access (audit + phantom-row debugging) --
+    getFixLog() {
+      return { ok: true, count: FIX_LOG.entries.length, entries: FIX_LOG.entries.slice() };
+    },
+    clearFixLog() {
+      const n = FIX_LOG.entries.length;
+      FIX_LOG.clear();
+      return { ok: true, cleared: n };
+    },
+    exportFixLog() {
+      return { ok: true, count: FIX_LOG.entries.length, json: JSON.stringify(FIX_LOG.entries, null, 2) };
     },
 
     // -- Pagination (Phase 2 stubs — need a probe to fill in) --
@@ -1035,6 +1124,22 @@
       #${UI.id} .wlpd-issue[data-category="attendance"] { border-left-color: #dc2626; }
       #${UI.id} .wlpd-main { font-weight: 650; }
       #${UI.id} .wlpd-meta { color: #475569; margin-top: 2px; overflow-wrap: anywhere; }
+      #${UI.id} .wlpd-investigate {
+        border: 1px solid #d8dee8;
+        border-radius: 6px;
+        padding: 8px 10px;
+        background: #f8fafc;
+        color: #334155;
+      }
+      #${UI.id} .wlpd-investigate[hidden] { display: none; }
+      #${UI.id} .wlpd-investigate ol { margin: 6px 0 6px 18px; padding: 0; }
+      #${UI.id} .wlpd-investigate li { margin: 3px 0; }
+      #${UI.id} .wlpd-investigate code {
+        background: #e2e8f0;
+        padding: 0 4px;
+        border-radius: 3px;
+        font-size: 12px;
+      }
       #${UI.id} .wlpd-empty {
         padding: 12px;
         border: 1px dashed #cbd5e1;
@@ -1175,6 +1280,29 @@
       }
       return;
     }
+    if (action === 'export-log') {
+      const result = API.exportFixLog();
+      if (navigator.clipboard?.writeText) {
+        navigator.clipboard.writeText(result.json).then(
+          () => notifyPanel(`Copied ${result.count} fix-log entries to clipboard.`),
+          () => notifyPanel(`Clipboard blocked. ${result.count} entries available via WLPayrollDriver.getFixLog().`, 'warn')
+        );
+      } else {
+        notifyPanel(`Clipboard unavailable. ${result.count} entries available via WLPayrollDriver.getFixLog().`, 'warn');
+      }
+      return;
+    }
+    if (action === 'clear-log') {
+      if (!confirm('Clear all stored fix-log entries? This cannot be undone.')) return;
+      const result = API.clearFixLog();
+      notifyPanel(`Cleared ${result.cleared} fix-log entries.`);
+      return;
+    }
+    if (action === 'toggle-investigate') {
+      const box = document.getElementById(UI.id)?.querySelector('.wlpd-investigate');
+      if (box) box.hidden = !box.hidden;
+      return;
+    }
     if (action === 'collapse') {
       document.getElementById(UI.id)?.classList.toggle('is-collapsed');
       return;
@@ -1249,10 +1377,32 @@
             <button data-action="manual-tabs">Manual tabs</button>
             <button data-action="reconcile-tabs">Roster tabs</button>
             <button data-action="refresh">Reload</button>
+            <button data-action="export-log" title="Copy fix log JSON to clipboard">Export log</button>
+            <button data-action="toggle-investigate" title="Show phantom-row debug tip">Phantom tip</button>
             <label class="wlpd-option">
               <input type="checkbox" data-setting="skip-fix-confirm" ${UI.settings.skipFixConfirm ? 'checked' : ''}>
               Skip fix confirm
             </label>
+          </div>
+          <div class="wlpd-investigate" hidden>
+            <strong>If you suspect a phantom row</strong>
+            <ol>
+              <li>Open DevTools (Cmd+Opt+I / F12) before clicking Fix.</li>
+              <li>Run the Fix as normal.</li>
+              <li>Click <strong>Export log</strong> &mdash; the JSON copies to your clipboard.</li>
+              <li>Paste it anywhere and look at the most recent <code>save-payload</code> entry. The <code>snapshot</code> shows what the popup told us; the <code>payload</code> shows what we sent to WL. Mismatch = phantom risk.</li>
+            </ol>
+            <details>
+              <summary>Deeper investigation (manual DOM/network check)</summary>
+              <ol>
+                <li>Elements tab: watch <code>.js-single-staff-block.js-show</code> &mdash; note <code>data-period</code> and <code>data-date</code> as the popup opens.</li>
+                <li>Network tab: filter by <code>staffSubstituteSave</code> and inspect the request payload.</li>
+                <li>Reload the report after fix. A new $0/0/0/0 row at the same date/time = mis-keyed save.</li>
+              </ol>
+            </details>
+            <div style="margin-top:6px;">
+              <button data-action="clear-log" data-danger="true" title="Wipe stored fix log">Clear log</button>
+            </div>
           </div>
           <div class="wlpd-counts"></div>
           <div class="wlpd-status">Ready. Run Scan after the Payroll Details report has loaded.</div>
