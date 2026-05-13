@@ -10,7 +10,7 @@
 // @match       *://www.wellnessliving.com/Wl/Staff/Pay/Report/StaffPayDetailReport.html*
 // @grant       GM_openInTab
 // @grant       unsafeWindow
-// @version     1.3.3
+// @version     1.3.4
 // @description Payroll Details audit, review, and guarded pay-rate fixing for WellnessLiving
 // ==/UserScript==
 
@@ -29,7 +29,7 @@
  * the confirm buttons asynchronously after Quick Substitution is triggered; if
  * you combine trigger + confirm in one call, the click silently fails.
  *
- * Version: 1.3.3
+ * Version: 1.3.4
  */
 (function () {
   'use strict';
@@ -268,7 +268,7 @@
 
   // -- Public API --
   const API = {
-    version: '1.3.3',
+    version: '1.3.4',
 
     /** Read-only: classify every row on the current page. */
     scan() {
@@ -318,13 +318,20 @@
       const rows = document.querySelectorAll('tr.js-content-row');
       const errors = [];
       const needsReconciliation = [];
+      const parseSkipped = [];
       rows.forEach(row => {
         const staff = getText(row, COL.staff);
         if (!staff) return;
+        const serviceType = getText(row, COL.service);
         const tipEl = getCell(row, COL.details)?.querySelector('[data-title-backup]');
         const tip = tipEl?.getAttribute('data-title-backup') || '';
         const m = tip.match(/Booked:\s*(\d+).*?Attended:\s*(\d+).*?No-shows:\s*(\d+).*?Late cancels:\s*(\d+)/i);
-        if (!m) return;
+        if (!m) {
+          if (serviceType === 'Class') {
+            parseSkipped.push({ key: makeRowKey(row), staff, date: getText(row, COL.date), details: getText(row, COL.details) });
+          }
+          return;
+        }
         const [booked, attended, noShows, lateCx] = m.slice(1).map(Number);
         const sum = attended + noShows + lateCx;
         const gap = booked - sum;  // positive = unresolved check-ins, negative = impossible over-count
@@ -340,7 +347,7 @@
           needsReconciliation.push({ ...base, gap });
         }
       });
-      return { ok: true, errors, needsReconciliation };
+      return { ok: true, errors, needsReconciliation, parseSkipped };
     },
 
     /**
@@ -1059,6 +1066,7 @@
     const list = panel.querySelector('.wlpd-list');
     const attErrors = attendance?.errors || [];
     const attReview = attendance?.needsReconciliation || [];
+    const attSkipped = attendance?.parseSkipped || [];
     const issueRows = scan.rows.filter(row => row.category !== 'ok');
 
     counts.innerHTML = [
@@ -1067,6 +1075,7 @@
       `<span class="wlpd-pill" data-tone="${scan.manual ? 'bad' : 'ok'}">Manual ${scan.manual}</span>`,
       `<span class="wlpd-pill" data-tone="${attReview.length ? 'warn' : 'ok'}">Roster review ${attReview.length}</span>`,
       `<span class="wlpd-pill" data-tone="${attErrors.length ? 'bad' : 'ok'}">Attendance errors ${attErrors.length}</span>`,
+      ...(attSkipped.length ? [`<span class="wlpd-pill" data-tone="warn">Unreadable ${attSkipped.length}</span>`] : []),
     ].join('');
 
     const parts = [];
@@ -1109,6 +1118,15 @@
         </div>
       `);
     }
+    for (const row of attSkipped) {
+      parts.push(`
+        <div class="wlpd-issue" data-category="unreadable" data-key="${escapeHtml(row.key)}">
+          <div class="wlpd-main">Unreadable - ${escapeHtml(row.staff)}</div>
+          <div class="wlpd-meta">${escapeHtml(row.date)} - ${escapeHtml(row.details)}</div>
+          <div class="wlpd-meta">Tooltip did not match expected attendance format</div>
+        </div>
+      `);
+    }
 
     list.innerHTML = parts.length
       ? parts.join('')
@@ -1121,7 +1139,8 @@
     UI.lastScan = { scan, attendance, at: new Date() };
     API.highlightIssues();
     renderPanel(scan, attendance);
-    notifyPanel(`Scan complete: ${scan.fixable} fixable, ${scan.manual} manual, ${attendance.needsReconciliation.length} roster review.`);
+    const skippedNote = attendance.parseSkipped.length ? `, ${attendance.parseSkipped.length} unreadable` : '';
+    notifyPanel(`Scan complete: ${scan.fixable} fixable, ${scan.manual} manual, ${attendance.needsReconciliation.length} roster review${skippedNote}.`);
     return UI.lastScan;
   }
 
