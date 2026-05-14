@@ -10,7 +10,7 @@
 // @match       *://www.wellnessliving.com/Wl/Staff/Pay/Report/StaffPayDetailReport.html*
 // @grant       GM_openInTab
 // @grant       unsafeWindow
-// @version     1.4.0
+// @version     1.4.1
 // @description Payroll Details audit, review, and guarded pay-rate fixing for WellnessLiving
 // ==/UserScript==
 
@@ -29,7 +29,7 @@
  * the confirm buttons asynchronously after Quick Substitution is triggered; if
  * you combine trigger + confirm in one call, the click silently fails.
  *
- * Version: 1.4.0
+ * Version: 1.4.1
  */
 (function () {
   'use strict';
@@ -189,6 +189,16 @@
       .filter(row => getText(row, COL.staff));
   }
 
+  // Detail report has per-visit rows with pay rate, class period, and date.
+  // Summary report has per-staff aggregate rows (no rate, no period, no per-class
+  // breakdown) — only the booked/attended/noShows/lateCx totals.
+  function getReportMode() {
+    const path = location.pathname || '';
+    if (path.includes('StaffPaySummaryReport')) return 'summary';
+    if (path.includes('StaffPayDetailReport') || path.includes('report-view.html')) return 'detail';
+    return 'unknown';
+  }
+
   function getRowByKey(rowKey) {
     return getDataRows().find(row => makeRowKey(row) === rowKey) || null;
   }
@@ -314,10 +324,17 @@
 
   // -- Public API --
   const API = {
-    version: '1.4.0',
+    version: '1.4.1',
 
     /** Read-only: classify every row on the current page. */
     scan() {
+      const mode = getReportMode();
+      if (mode === 'summary') {
+        // Summary report has no pay rate / class period — pay-rate scan is N/A.
+        // Attendance check is handled separately via checkAttendance().
+        const totalRows = getDataRows().length;
+        return { ok: true, mode, totalRows, fixable: 0, manual: 0, ok_: totalRows, rows: [] };
+      }
       const rows = document.querySelectorAll('tr.js-content-row');
       const results = [];
       rows.forEach(row => {
@@ -327,6 +344,7 @@
       });
       return {
         ok: true,
+        mode,
         totalRows: results.length,
         fixable: results.filter(r => r.category === 'fixable').length,
         manual:  results.filter(r => r.category === 'manual').length,
@@ -361,6 +379,7 @@
      *     `rosterUrl` (from the Booked column anchor) for one-click opening.
      */
     checkAttendance() {
+      const mode = getReportMode();
       const rows = document.querySelectorAll('tr.js-content-row');
       const errors = [];
       const needsReconciliation = [];
@@ -368,23 +387,46 @@
       rows.forEach(row => {
         const staff = getText(row, COL.staff);
         if (!staff) return;
-        const serviceType = getText(row, COL.service);
-        const tipEl = getCell(row, COL.details)?.querySelector('[data-title-backup]');
-        const tip = tipEl?.getAttribute('data-title-backup') || '';
-        const m = tip.match(/Booked:\s*(\d+).*?Attended:\s*(\d+).*?No-shows:\s*(\d+).*?Late cancels:\s*(\d+)/i);
-        if (!m) {
-          if (serviceType === 'Class') {
-            parseSkipped.push({ key: makeRowKey(row), staff, date: getText(row, COL.date), details: getText(row, COL.details) });
+
+        let booked, attended, noShows, lateCx;
+        let detailsText = '';
+        let dateText = '';
+        let rosterUrl = null;
+
+        if (mode === 'summary') {
+          // Summary rows expose totals directly in the data cells — no tooltip,
+          // no per-class breakdown. Just verify the aggregate adds up.
+          booked   = parseInt(getText(row, COL.booked),   10);
+          attended = parseInt(getText(row, COL.attended), 10);
+          noShows  = parseInt(getText(row, COL.noShows),  10);
+          lateCx   = parseInt(getText(row, COL.lateCx),   10);
+          if ([booked, attended, noShows, lateCx].some(n => Number.isNaN(n))) {
+            parseSkipped.push({ key: makeRowKey(row), staff, date: '', details: 'summary row: counts unreadable' });
+            return;
           }
-          return;
+          detailsText = `Booked ${booked} / Att ${attended} / NS ${noShows} / LC ${lateCx}`;
+        } else {
+          const serviceType = getText(row, COL.service);
+          const tipEl = getCell(row, COL.details)?.querySelector('[data-title-backup]');
+          const tip = tipEl?.getAttribute('data-title-backup') || '';
+          const m = tip.match(/Booked:\s*(\d+).*?Attended:\s*(\d+).*?No-shows:\s*(\d+).*?Late cancels:\s*(\d+)/i);
+          if (!m) {
+            if (serviceType === 'Class') {
+              parseSkipped.push({ key: makeRowKey(row), staff, date: getText(row, COL.date), details: getText(row, COL.details) });
+            }
+            return;
+          }
+          [booked, attended, noShows, lateCx] = m.slice(1).map(Number);
+          detailsText = getText(row, COL.details);
+          dateText = getText(row, COL.date);
+          rosterUrl = getCell(row, COL.booked)?.querySelector('a')?.href || null;
         }
-        const [booked, attended, noShows, lateCx] = m.slice(1).map(Number);
+
         const sum = attended + noShows + lateCx;
         const gap = booked - sum;  // positive = unresolved check-ins, negative = impossible over-count
-        const rosterUrl = getCell(row, COL.booked)?.querySelector('a')?.href || null;
         const base = {
           key: makeRowKey(row),
-          staff, details: getText(row, COL.details), date: getText(row, COL.date),
+          staff, details: detailsText, date: dateText,
           booked, attended, noShows, lateCx, rosterUrl,
         };
         if (gap < 0) {
@@ -393,7 +435,7 @@
           needsReconciliation.push({ ...base, gap });
         }
       });
-      return { ok: true, errors, needsReconciliation, parseSkipped };
+      return { ok: true, mode, errors, needsReconciliation, parseSkipped };
     },
 
     /**
@@ -500,7 +542,43 @@
      * Uses data attributes and inline styles so it works from console or userscript.
      */
     highlightIssues() {
-      const summary = { ok: true, highlighted: 0, fixable: 0, manual: 0 };
+      if (getReportMode() === 'summary') {
+        // Summary mode: only meaningful check is attendance aggregation.
+        const att = this.checkAttendance();
+        const errKeys = new Map(att.errors.map(e => [e.key, e]));
+        const reviewKeys = new Map(att.needsReconciliation.map(r => [r.key, r]));
+        const summary = { ok: true, mode: 'summary', highlighted: 0, errors: 0, reconciliation: 0 };
+        for (const row of getDataRows()) {
+          row.removeAttribute('data-wl-payroll-category');
+          row.removeAttribute('data-wl-payroll-issue');
+          row.title = '';
+          row.style.outline = '';
+          row.style.backgroundColor = '';
+
+          const key = makeRowKey(row);
+          const err = errKeys.get(key);
+          const review = reviewKeys.get(key);
+          if (!err && !review) continue;
+
+          const issueText = err
+            ? err.error
+            : `Booked ${review.booked} > sum ${review.attended + review.noShows + review.lateCx} (gap ${review.gap})`;
+          row.dataset.wlPayrollCategory = err ? 'attendance-error' : 'attendance-review';
+          row.dataset.wlPayrollIssue = issueText;
+          row.title = issueText;
+          row.style.outline = err
+            ? '2px solid rgba(185, 28, 28, 0.65)'
+            : '2px solid rgba(180, 83, 9, 0.65)';
+          row.style.backgroundColor = err
+            ? 'rgba(248, 113, 113, 0.14)'
+            : 'rgba(251, 191, 36, 0.16)';
+          summary.highlighted++;
+          if (err) summary.errors++; else summary.reconciliation++;
+        }
+        return summary;
+      }
+
+      const summary = { ok: true, mode: 'detail', highlighted: 0, fixable: 0, manual: 0 };
       for (const row of getDataRows()) {
         row.removeAttribute('data-wl-payroll-category');
         row.removeAttribute('data-wl-payroll-issue');
@@ -1199,15 +1277,17 @@
         </div>
       `);
     }
+    const rowMeta = (row) => row.date ? `${escapeHtml(row.date)} - ${escapeHtml(row.details)}` : escapeHtml(row.details);
+    const rosterActions = (row) => row.rosterUrl
+      ? `<div class="wlpd-row-actions" style="margin-top:7px;"><button data-action="roster" data-key="${escapeHtml(row.key)}">Roster</button></div>`
+      : '';
     for (const row of attErrors) {
       parts.push(`
         <div class="wlpd-issue" data-category="attendance" data-key="${escapeHtml(row.key)}">
           <div class="wlpd-main">Attendance over-count - ${escapeHtml(row.staff)}</div>
-          <div class="wlpd-meta">${escapeHtml(row.date)} - ${escapeHtml(row.details)}</div>
+          <div class="wlpd-meta">${rowMeta(row)}</div>
           <div class="wlpd-meta">${escapeHtml(row.error)}</div>
-          <div class="wlpd-row-actions" style="margin-top:7px;">
-            <button data-action="roster" data-key="${escapeHtml(row.key)}">Roster</button>
-          </div>
+          ${rosterActions(row)}
         </div>
       `);
     }
@@ -1215,11 +1295,9 @@
       parts.push(`
         <div class="wlpd-issue" data-category="attendance" data-key="${escapeHtml(row.key)}">
           <div class="wlpd-main">Roster review - ${escapeHtml(row.staff)}</div>
-          <div class="wlpd-meta">${escapeHtml(row.date)} - ${escapeHtml(row.details)}</div>
+          <div class="wlpd-meta">${rowMeta(row)}</div>
           <div class="wlpd-meta">Booked gap: ${escapeHtml(row.gap)}</div>
-          <div class="wlpd-row-actions" style="margin-top:7px;">
-            <button data-action="roster" data-key="${escapeHtml(row.key)}">Roster</button>
-          </div>
+          ${rosterActions(row)}
         </div>
       `);
     }
@@ -1245,7 +1323,12 @@
     API.highlightIssues();
     renderPanel(scan, attendance);
     const skippedNote = attendance.parseSkipped.length ? `, ${attendance.parseSkipped.length} unreadable` : '';
-    notifyPanel(`Scan complete: ${scan.fixable} fixable, ${scan.manual} manual, ${attendance.needsReconciliation.length} roster review${skippedNote}.`);
+    if (scan.mode === 'summary') {
+      const mismatches = attendance.errors.length + attendance.needsReconciliation.length;
+      notifyPanel(`Summary scan: ${scan.totalRows} staff, ${mismatches} attendance mismatch${mismatches === 1 ? '' : 'es'}${skippedNote}.`);
+    } else {
+      notifyPanel(`Scan complete: ${scan.fixable} fixable, ${scan.manual} manual, ${attendance.needsReconciliation.length} roster review${skippedNote}.`);
+    }
     return UI.lastScan;
   }
 
