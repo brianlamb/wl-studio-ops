@@ -10,7 +10,7 @@
 // @match       *://www.wellnessliving.com/Wl/Staff/Pay/Report/StaffPayDetailReport.html*
 // @grant       GM_openInTab
 // @grant       unsafeWindow
-// @version     1.4.2
+// @version     1.5.1
 // @description Payroll Details audit, review, and guarded pay-rate fixing for WellnessLiving
 // ==/UserScript==
 
@@ -33,7 +33,7 @@
  * the confirm buttons asynchronously after Quick Substitution is triggered; if
  * you combine trigger + confirm in one call, the click silently fails.
  *
- * Version: 1.4.2
+ * Version: 1.5.1
  */
 (function () {
   'use strict';
@@ -308,6 +308,17 @@
   };
   FIX_LOG.load();
 
+  // Class periods re-keyed server-side during this page load. WL's
+  // staffSubstituteSave SPLITS a recurring series on every successful save: the
+  // fixed date keeps its k_class_period, sibling dates are moved to NEW period
+  // ids (verified 2026-06-11: fixing (18062815, May 13) moved May 20/27 to
+  // 18064081). Every other row of that series still on the page then carries a
+  // stale period key — a further save through one either fails server-side
+  // ("class-period-date-out") or can be applied to a DIFFERENT date of the
+  // series (a May 14 fix landed on May 7). One fix per class period per page
+  // load; reload + rescan before touching the rest of the series.
+  const RELOAD_REQUIRED_PERIODS = new Set();
+
   // Snapshot of popup state for diagnosing phantom-row bugs. Captures the
   // attributes the save payload is built from so we can spot mismatches.
   function capturePopupSnapshot() {
@@ -326,9 +337,53 @@
     };
   }
 
+  // -- Passive native-save observer --
+  // Records EVERY Quick Substitution save that goes through the page's AAjax —
+  // including ones triggered by manual clicks on WL's own apply button — into
+  // the same fix log. This makes manual sessions auditable: reload, fix rows
+  // by hand, Export log, and each native save's payload + popup snapshot +
+  // server status is captured for comparison against driver-initiated saves.
+  let DRIVER_SAVE_IN_FLIGHT = false;
+
+  function installNativeSaveObserver() {
+    const ajax = PAGE.AAjax;
+    if (!ajax || typeof ajax.method !== 'function') return false;
+    if (ajax.method.wlPayrollObserved) return true;
+    const original = ajax.method;
+    const wrapped = function (opts) {
+      try {
+        if (opts && String(opts.s_method || '').includes('staffSubstituteSave')) {
+          const source = DRIVER_SAVE_IN_FLIGHT ? 'driver' : 'native';
+          FIX_LOG.push({ phase: 'save-observed', source, payload: opts.a_data, snapshot: capturePopupSnapshot() });
+          const onSuccess = opts.call_success;
+          const onFail = opts.call_fail;
+          opts.call_success = function (_sender, response) {
+            const status = response?.s_status || response?.status || null;
+            FIX_LOG.push({ phase: 'save-observed-result', source, ok: status === 'ok', status });
+            return typeof onSuccess === 'function' ? onSuccess.apply(this, arguments) : undefined;
+          };
+          opts.call_fail = function (_sender, response) {
+            FIX_LOG.push({ phase: 'save-observed-result', source, ok: false, status: 'request-failed' });
+            return typeof onFail === 'function' ? onFail.apply(this, arguments) : undefined;
+          };
+        }
+      } catch (e) { /* observation must never break the page's save */ }
+      return original.apply(this, arguments);
+    };
+    wrapped.wlPayrollObserved = true;
+    ajax.method = wrapped;
+    return true;
+  }
+
+  // AAjax may not exist yet at userscript injection time — retry until armed.
+  (function armNativeSaveObserver(attempt = 0) {
+    if (installNativeSaveObserver()) return;
+    if (attempt < 40) setTimeout(() => armNativeSaveObserver(attempt + 1), 500);
+  })();
+
   // -- Public API --
   const API = {
-    version: '1.4.2',
+    version: '1.5.1',
 
     /** Read-only: classify every row on the current page. */
     scan() {
@@ -370,6 +425,35 @@
     /** Read-only: every non-OK pay-rate issue on the current page. */
     getIssues() {
       return this.scan().rows.filter(r => r.category !== 'ok');
+    },
+
+    /**
+     * Cross-reference the persistent fix log against the current page: a row whose
+     * earlier fix reported ok but that is STILL fixable after a reload means WL
+     * applied the save somewhere else — observed 2026-06-11: a fix for the May 14
+     * row of a series returned status ok but the rate change landed on May 7.
+     * Matching ignores the period id segment of the row key, because WL re-keys
+     * the series after each save and the id legitimately changes across reloads.
+     */
+    checkFixesStuck() {
+      const prefixOf = (key) => String(key || '').split('|').slice(0, 3).join('|');
+      const okFixes = new Map();
+      for (const e of FIX_LOG.entries) {
+        if (e.phase === 'fix-end' && e.ok && e.rowKey) okFixes.set(prefixOf(e.rowKey), e);
+      }
+      const rows = this.getFixable()
+        .filter(r => okFixes.has(prefixOf(r.key)))
+        .map(r => ({
+          key: r.key,
+          staff: r.staff,
+          date: r.date,
+          details: r.details,
+          period: r.period,
+          fixReportedAt: okFixes.get(prefixOf(r.key)).ts,
+          warning: 'earlier fix reported ok but this rate is still wrong — WL may have applied it to a ' +
+            'different date of this class series; check sibling dates before refixing',
+        }));
+      return { ok: true, count: rows.length, rows };
     },
 
     /**
@@ -883,11 +967,13 @@
           resolve(result);
         };
         try {
+          DRIVER_SAVE_IN_FLIGHT = true;
           PAGE.AAjax.method({
             a_data: payload,
             call_success(_sender, response) {
               const status = response?.s_status || response?.status || '';
               if (status === 'ok') {
+                RELOAD_REQUIRED_PERIODS.add(currentPeriod);
                 const selectedPay = paySelect.selectedOptions?.[0];
                 const staffName = staffSelect.selectedOptions?.[0]?.textContent?.trim() || '';
                 const payTitle = selectedPay?.getAttribute('data-title') || selectedPay?.textContent?.trim() || '';
@@ -897,9 +983,21 @@
                 staffSelect.dataset.pay = paySelect.value;
                 holder.querySelector('.js-buttons-container')?.style.setProperty('display', 'none');
                 finish({ ok: true, status, period: currentPeriod, dateLocal, selected: payTitle, value: paySelect.value });
+              } else if (status === 'class-period-date-out') {
+                holder.querySelector('.js-buttons-container')?.style.removeProperty('display');
+                RELOAD_REQUIRED_PERIODS.add(currentPeriod);
+                finish({
+                  ok: false,
+                  status,
+                  staleClassPeriod: true,
+                  error: `WL refused: ${dateLocal} no longer belongs to class period ${currentPeriod} — ` +
+                    'the series was re-keyed by an earlier fix or a schedule edit. Reload the report and ' +
+                    'rescan to pick up the new period id, then retry this row.',
+                  response,
+                });
               } else {
                 holder.querySelector('.js-buttons-container')?.style.removeProperty('display');
-                finish({ ok: false, error: `save returned status "${status || 'unknown'}"`, response });
+                finish({ ok: false, status: status || null, error: `save returned status "${status || 'unknown'}"`, response });
               }
             },
             call_fail(_sender, response) {
@@ -911,6 +1009,8 @@
           });
         } catch (e) {
           finish({ ok: false, error: `AAjax save threw: ${e.message}` });
+        } finally {
+          DRIVER_SAVE_IN_FLIGHT = false;
         }
         setTimeout(() => finish({ ok: false, error: 'save request timed out' }), 12000);
       });
@@ -960,6 +1060,12 @@
      * Returns {ok, phase, ...} — phase identifies the failure point if any step fails.
      * Recommended over manually chaining the individual primitives.
      *
+     * IMPORTANT: a successful save re-keys the rest of the class series server-side
+     * (see RELOAD_REQUIRED_PERIODS). The result carries `reloadRequired: true`;
+     * reload + rescan before fixing any other row, especially of the same series —
+     * further fixRow calls against the touched period are refused with phase
+     * 'reload-required' until the page is reloaded.
+     *
      * @param {string} rowKey - from scan().rows[].key
      * @param {string} keyword - one of 'community', 'hybrid', 'aerial', '75-90', '75', '45-60'
      */
@@ -968,38 +1074,54 @@
       const expectedPeriod = row ? getRowPeriod(row) : '';
       const expectedDateLocal = row ? getRowDateLocal(row) : '';
       FIX_LOG.push({ phase: 'fix-start', rowKey, keyword, expectedPeriod, expectedDateLocal });
+      // Early aborts must reach the fix log too — without this, failures before
+      // the save phase (verify-popup especially) are invisible in exports.
+      const abort = (result) => {
+        FIX_LOG.push({ phase: 'fix-abort', rowKey, keyword, ...result });
+        return result;
+      };
+      if (expectedPeriod && RELOAD_REQUIRED_PERIODS.has(expectedPeriod)) {
+        return abort({
+          ok: false,
+          phase: 'reload-required',
+          key: rowKey,
+          period: expectedPeriod,
+          error: `class period ${expectedPeriod} was re-keyed by an earlier fix this page load — ` +
+            'reload the report and rescan before fixing this row',
+        });
+      }
       const open = this.openRow(rowKey);
-      if (!open.ok) return { phase: 'open', key: rowKey, ...open };
+      if (!open.ok) return abort({ ok: false, phase: 'open', key: rowKey, ...open });
       await sleep(800);
       const actualPeriod = getOpenPopupPeriod();
       const actualDateLocal = getOpenPopupDateLocal();
       if (expectedPeriod && actualPeriod && actualPeriod !== expectedPeriod) {
-        return {
+        return abort({
           ok: false,
           phase: 'verify-popup',
           key: rowKey,
           expectedPeriod,
           actualPeriod,
           error: `opened popup period ${actualPeriod}, expected ${expectedPeriod}`,
-        };
+        });
       }
       if (expectedDateLocal && actualDateLocal && actualDateLocal !== expectedDateLocal) {
-        return {
+        return abort({
           ok: false,
           phase: 'verify-popup',
           key: rowKey,
           expectedDateLocal,
           actualDateLocal,
           error: `opened popup date ${actualDateLocal}, expected ${expectedDateLocal}`,
-        };
+        });
       }
       const id = this.findSubContainerId();
-      if (!id.ok) return { phase: 'find', key: rowKey, ...id };
+      if (!id.ok) return abort({ ok: false, phase: 'find', key: rowKey, ...id });
       const trig = this.triggerQuickSub(id.id);
-      if (!trig.ok) return { phase: 'trigger', key: rowKey, visitId: id.id, ...trig };
+      if (!trig.ok) return abort({ ok: false, phase: 'trigger', key: rowKey, visitId: id.id, ...trig });
       await sleep(300);
       const sel = this.selectPayRate(keyword);
-      if (!sel.ok) return { phase: 'select', key: rowKey, visitId: id.id, ...sel };
+      if (!sel.ok) return abort({ ok: false, phase: 'select', key: rowKey, visitId: id.id, ...sel });
       await sleep(150);
       const direct = await this.saveQuickSubDirect(sel.value, expectedDateLocal, expectedPeriod);
       if (!direct.ok && direct.error !== 'AAjax.method not available') {
@@ -1023,6 +1145,8 @@
         visitId: id.id,
         selected: direct.selected || sel.selected,
         saveMode: direct.ok ? 'direct-ajax' : 'button-fallback',
+        reloadRequired: true,
+        period: expectedPeriod || null,
         toast,
       };
     },
@@ -1248,7 +1372,7 @@
     }
   }
 
-  function renderPanel(scan, attendance) {
+  function renderPanel(scan, attendance, stuck) {
     const panel = document.getElementById(UI.id);
     if (!panel) return;
     const counts = panel.querySelector('.wlpd-counts');
@@ -1256,6 +1380,7 @@
     const attErrors = attendance?.errors || [];
     const attReview = attendance?.needsReconciliation || [];
     const attSkipped = attendance?.parseSkipped || [];
+    const stuckByKey = new Map((stuck?.rows || []).map(row => [row.key, row]));
     const issueRows = scan.rows.filter(row => row.category !== 'ok');
 
     counts.innerHTML = [
@@ -1265,17 +1390,20 @@
       `<span class="wlpd-pill" data-tone="${attReview.length ? 'warn' : 'ok'}">Roster review ${attReview.length}</span>`,
       `<span class="wlpd-pill" data-tone="${attErrors.length ? 'bad' : 'ok'}">Attendance errors ${attErrors.length}</span>`,
       ...(attSkipped.length ? [`<span class="wlpd-pill" data-tone="warn">Unreadable ${attSkipped.length}</span>`] : []),
+      ...(stuckByKey.size ? [`<span class="wlpd-pill" data-tone="bad">Did not stick ${stuckByKey.size}</span>`] : []),
     ].join('');
 
     const parts = [];
     for (const row of issueRows) {
       const canFix = row.category === 'fixable';
+      const stuckRow = stuckByKey.get(row.key);
       parts.push(`
         <div class="wlpd-issue" data-category="${escapeHtml(row.category)}" data-key="${escapeHtml(row.key)}">
           <div class="wlpd-main">${escapeHtml(row.staff)} - ${escapeHtml(row.date)}</div>
           <div class="wlpd-meta">${escapeHtml(row.details)}</div>
           ${row.period ? `<div class="wlpd-meta">Class period ${escapeHtml(row.period)}${row.dateLocal ? ` / ${escapeHtml(row.dateLocal)}` : ''}</div>` : ''}
           <div class="wlpd-meta">${escapeHtml(row.issue || '')}</div>
+          ${stuckRow ? `<div class="wlpd-meta" style="color:#991b1b;font-weight:600;">Earlier fix reported ok but did not stick — check sibling dates of this series before refixing</div>` : ''}
           <div class="wlpd-row-actions" style="margin-top:7px;">
             <button data-action="open" data-key="${escapeHtml(row.key)}">Open</button>
             ${canFix ? `<button data-action="fix" data-primary="true" data-key="${escapeHtml(row.key)}">Set ${escapeHtml(row.expectedKeyword)}</button>` : ''}
@@ -1325,13 +1453,16 @@
   function runPanelScan() {
     const scan = API.scan();
     const attendance = API.checkAttendance();
-    UI.lastScan = { scan, attendance, at: new Date() };
+    const stuck = scan.mode === 'summary' ? { ok: true, count: 0, rows: [] } : API.checkFixesStuck();
+    UI.lastScan = { scan, attendance, stuck, at: new Date() };
     API.highlightIssues();
-    renderPanel(scan, attendance);
+    renderPanel(scan, attendance, stuck);
     const skippedNote = attendance.parseSkipped.length ? `, ${attendance.parseSkipped.length} unreadable` : '';
     if (scan.mode === 'summary') {
       const mismatches = attendance.errors.length + attendance.needsReconciliation.length;
       notifyPanel(`Summary scan: ${scan.totalRows} staff, ${mismatches} attendance mismatch${mismatches === 1 ? '' : 'es'}${skippedNote}.`);
+    } else if (stuck.count) {
+      notifyPanel(`Scan complete: ${scan.fixable} fixable, ${scan.manual} manual${skippedNote} — ${stuck.count} earlier fix${stuck.count === 1 ? '' : 'es'} did NOT stick; check sibling dates.`, 'warn');
     } else {
       notifyPanel(`Scan complete: ${scan.fixable} fixable, ${scan.manual} manual, ${attendance.needsReconciliation.length} roster review${skippedNote}.`);
     }
@@ -1425,10 +1556,22 @@
       const result = await API.fixRow(item.key, item.expectedKeyword);
       button.disabled = false;
       if (!result.ok) {
-        notifyPanel(`Fix failed at ${result.phase || 'unknown'}: ${result.error || 'unknown error'}`, 'error');
+        const tone = result.phase === 'reload-required' || result.staleClassPeriod ? 'warn' : 'error';
+        notifyPanel(`Fix failed at ${result.phase || 'unknown'}: ${result.error || 'unknown error'}`, tone);
         return;
       }
-      notifyPanel(`Fix saved: ${result.selected}. Reload before final verification.`, 'warn');
+      notifyPanel(`Fix saved: ${result.selected}. WL re-keyed this class series — reload before fixing more rows.`, 'warn');
+      if (confirm([
+        'Fix saved.',
+        '',
+        'WellnessLiving re-keys the class series after every substitution save, so the',
+        'remaining rows of this series now carry stale period ids on this page.',
+        '',
+        'Reload the report now? (Recommended. Cancel only to fix rows of OTHER classes;',
+        'same-series rows stay blocked until reload either way.)',
+      ].join('\n'))) {
+        API.refreshReport();
+      }
     }
   }
 

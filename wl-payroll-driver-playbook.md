@@ -56,6 +56,14 @@ Pay-rate fixes now commit through the same `Wl\Classes\Period\Staff\Ajax::staffS
 method that the Quick Substitution apply button calls. The button-click path remains as a fallback,
 but the primary path avoids bubbling click events that can close the popup before the save settles.
 
+**One fix per class series per page load.** A successful save makes WL re-key the rest of that
+recurring series: the fixed date keeps its `k_class_period`, sibling dates move to brand-new
+period ids (verified 2026-06-11 on the May report). Same-series rows still on the page then hold
+stale period keys, and further saves through them either fail with `class-period-date-out` or can
+be applied to a different date of the series. The driver tracks touched periods and refuses
+repeat fixes (`phase: 'reload-required'`); the panel prompts to reload after every successful
+fix. Reload + rescan, then continue with the next row.
+
 ## Claude/Chrome MCP setup (per session)
 
 1. User opens the Payroll Details report in Chrome and navigates to the period being audited.
@@ -119,13 +127,19 @@ targeted row** (blocks the stale-recurring-popup save) → trigger Quick Sub →
 `confirm()` only if the page AJAX object is unavailable → toast check. It owns the async waits,
 so a single tool call is safe.
 
-Returns `{ok, phase, saveMode, selected, toast}`:
-- `ok: true, saveMode: 'direct-ajax'` — normal success.
+Returns `{ok, phase, saveMode, selected, reloadRequired, toast}`:
+- `ok: true, saveMode: 'direct-ajax'` — normal success. `reloadRequired: true` means what it
+  says: reload + rescan before the next fix (WL re-keyed the series — see above).
 - `ok: true, saveMode: 'button-fallback'` — saved, but via the fallback; worth noting in the report.
-- `ok: false, phase: '...'` — `phase` names the failed step (`open`, `verify-popup`, `find`,
-  `trigger`, `select`, `save`, `confirm`).
+- `ok: false, phase: '...'` — `phase` names the failed step (`reload-required`, `open`,
+  `verify-popup`, `find`, `trigger`, `select`, `save`, `confirm`). `reload-required` is not an
+  error — it is the driver refusing to reuse a period id it already touched this page load.
 
-Every attempt is appended to the persistent fix log: `getFixLog()` / `exportFixLog()`.
+Every attempt is appended to the persistent fix log: `getFixLog()` / `exportFixLog()` — including
+early-phase aborts (`fix-abort` entries) and refused/failed saves. The driver also passively
+observes the page's own Quick Substitution saves: manual clicks on WL's apply button produce
+`save-observed` / `save-observed-result` entries (`source: 'native'`) with the same payload and
+popup snapshot, so manual sessions can be compared against driver-initiated ones.
 
 **Debug only — stepwise primitives.** If a row keeps failing and you need to isolate the phase,
 run the primitives in separate `javascript_tool` calls (WL renders the confirm form
@@ -143,6 +157,12 @@ After the loop completes, re-run `WLPayrollDriver.scan()` and diff against the i
 - Initial fixable count → after fixable count → should be 0 if every fix succeeded
 - Any rows that moved from `fixable` to `ok` confirm a successful save
 - Any rows still in `fixable` indicate a fix that didn't take — flag for manual investigation
+
+`WLPayrollDriver.checkFixesStuck()` automates that last check: it cross-references the
+persistent fix log against the current page (ignoring period ids, which change across reloads)
+and lists rows whose earlier fix reported ok but are still wrong — the signature of WL applying
+a save to a different date of the series. The panel runs this on every scan and shows a
+"Did not stick" pill plus a per-row warning.
 
 Report back to user:
 - N rows scanned, N flagged, N auto-fixed, N skipped (with reasons), N manual-review queued
@@ -169,7 +189,9 @@ Report back to user:
 | `confirm` returns `.js-button-apply not found` / `still visibility:hidden` | Quick Sub form not rendered yet — same async race — or `triggerQuickSub` never ran | Verify `isConfirmReady` returns `ready: true` before calling; note `confirm` is fallback-only — `saveQuickSubDirect` is the primary save |
 | `fixRow` returns `saveMode: 'button-fallback'` | Page AJAX object (`AAjax.method`) unavailable to the driver | Save still succeeded; if persistent across rows, investigate why the page world lost `AAjax` |
 | Fix fails with `opened popup date ... expected ...` | WL kept or reopened a stale class popup for a different recurring date | Close the popup, rescan, and retry the row; the driver blocks the save before calling WL |
-| Save returns `class-period-date-out` / "Selected date does not belong to class period" | The popup date and selected row date do not match the class period being saved | Rescan after reload; row identity must include both `k_class_period` and `dt_date` |
+| Save returns `class-period-date-out` / "Selected date does not belong to class period" | The row's period id is stale — WL re-keyed the series after an earlier fix (or a schedule edit); the date no longer belongs to that period | Reload + rescan to pick up the new period id, then retry; the driver marks the period reload-required automatically |
+| Fix fails with `phase: 'reload-required'` | The driver already fixed a row of this class series this page load — remaining sibling rows hold stale period ids | Not an error: reload + rescan, then fix the row with its fresh period id |
+| Fix reported ok but the row is still fixable after reload (`checkFixesStuck()` flags it) | WL applied the save to a different date of the series — its report row carried a (period, date) pair the save endpoint resolved to another occurrence | Check the sibling dates of that series for an unintended rate change, correct manually via the class popup, then refix the intended row from a freshly reloaded page |
 
 ## Next steps for this driver
 
