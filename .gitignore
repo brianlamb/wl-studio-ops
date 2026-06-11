@@ -4,3 +4,5 @@
 !.env.example
 reference/
 .claude/settings.local.json
+# vendored WellnessLiving PHP SDK — evaluated read-only, see sdk_payrate_eval.md
+wl-sdk/
