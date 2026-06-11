@@ -10,7 +10,7 @@
 // @match       *://www.wellnessliving.com/Wl/Staff/Pay/Report/StaffPayDetailReport.html*
 // @grant       GM_openInTab
 // @grant       unsafeWindow
-// @version     1.5.3
+// @version     1.5.4
 // @description Payroll Details audit, review, and guarded pay-rate fixing for WellnessLiving
 // ==/UserScript==
 
@@ -33,7 +33,7 @@
  * the confirm buttons asynchronously after Quick Substitution is triggered; if
  * you combine trigger + confirm in one call, the click silently fails.
  *
- * Version: 1.5.3
+ * Version: 1.5.4
  */
 (function () {
   'use strict';
@@ -354,12 +354,28 @@
       try {
         if (opts && String(opts.s_method || '').includes('staffSubstituteSave')) {
           const source = DRIVER_SAVE_IN_FLIGHT ? 'driver' : 'native';
+          const period = String(opts.a_data?.k_class_period || '');
           FIX_LOG.push({ phase: 'save-observed', source, payload: opts.a_data, snapshot: capturePopupSnapshot() });
           const onSuccess = opts.call_success;
           const onFail = opts.call_fail;
           opts.call_success = function (_sender, response) {
             const status = response?.s_status || response?.status || null;
             FIX_LOG.push({ phase: 'save-observed-result', source, ok: status === 'ok', status });
+            // Native saves invalidate periods exactly like driver saves do —
+            // feed the same staleness ledger so mixed manual/driver sessions
+            // share one source of truth (verified 2026-06-11: a manual save on
+            // (18002108, May 2) re-keyed May 9/16/23/30 within ~90s).
+            if (period && (status === 'ok' || status === 'class-period-date-out')) {
+              RELOAD_REQUIRED_PERIODS.add(period);
+            }
+            if (source === 'native' && status === 'ok') {
+              const sharing = getDataRows().filter(row => getRowPeriod(row) === period).length;
+              if (sharing > 1) {
+                notifyPanel(`Manual save touched class period ${period} — ${sharing - 1} other on-page row${sharing - 1 === 1 ? '' : 's'} share it and will go stale; reload before saving them.`, 'warn');
+              }
+            } else if (source === 'native' && status === 'class-period-date-out') {
+              notifyPanel(`WL refused the manual save: this date no longer belongs to class period ${period} (re-keyed). Reload and retry from fresh rows.`, 'warn');
+            }
             return typeof onSuccess === 'function' ? onSuccess.apply(this, arguments) : undefined;
           };
           opts.call_fail = function (_sender, response) {
@@ -383,7 +399,7 @@
 
   // -- Public API --
   const API = {
-    version: '1.5.3',
+    version: '1.5.4',
 
     /** Read-only: classify every row on the current page. */
     scan() {

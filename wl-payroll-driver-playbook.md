@@ -72,14 +72,18 @@ What the 2026-06-11 interleaved set/revert test established, and what is still o
 - Single-date periods are stable: repeated saves and reverts against the same (period, date) —
   nine in one session, both pay directions, driver and native interleaved — all succeeded with
   no side effects and no re-keying.
-- Re-keys happen only off saves against periods that still span multiple dates, but they can
-  complete **asynchronously** — one observed re-key materialized in a window with no adjacent
-  save, minutes after the triggering fix. A `class-period-date-out` can therefore appear even on
-  a freshly loaded page; the recovery is unchanged (reload, rescan, retry).
+- Re-keys happen only off saves against periods that still span multiple dates — confirmed
+  three times (driver and manual saves alike): saving one date re-keys the siblings within
+  roughly 90–150 seconds. The split job is **asynchronous**, so a `class-period-date-out` can
+  appear even on a freshly loaded page; the recovery is unchanged (reload, rescan, retry).
 - Report rate display lags accepted saves by anywhere from ~30 seconds to ~45 minutes.
-- Unexplained: one stale-period save was soft-accepted (status ok, applied correctly, late)
-  while another was hard-refused (`class-period-date-out`). Both behaviors are handled, but the
-  server's rule for choosing between them is not pinned down — keep the fix log when it recurs.
+- Working hypothesis on the one soft-accepted stale save: a stale-id save arriving **inside**
+  the async split window is still accepted and routed correctly (one observation at +21s after
+  the trigger), while saves after the job commits hard-refuse (five observations at +90s and
+  later). Not yet conclusive — keep the fix log when either behavior recurs.
+- The save observer feeds successful and refused native saves into the same reload-required
+  ledger the driver uses, so manual clicks and driver fixes share one staleness source of truth
+  and the panel warns when a manual save makes sibling rows stale.
 - Payload note: WL's native button sends `uid_staff` as a number, the driver as a string; the
   server accepts both.
 
