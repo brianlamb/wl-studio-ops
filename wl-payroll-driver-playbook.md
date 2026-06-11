@@ -56,12 +56,27 @@ Pay-rate fixes now commit through the same `Wl\Classes\Period\Staff\Ajax::staffS
 method that the Quick Substitution apply button calls. The button-click path remains as a fallback,
 but the primary path avoids bubbling click events that can close the popup before the save settles.
 
-## Console/Claude setup (per session)
+## Claude/Chrome MCP setup (per session)
 
 1. User opens the Payroll Details report in Chrome and navigates to the period being audited.
 2. Claude verifies the Chrome MCP extension is connected (`list_connected_browsers`).
-3. Claude injects the driver library via `javascript_tool` — paste the entire contents of
-   `wl-payroll-driver.user.js`. Verify the load message in the console.
+3. **No injection needed in the normal case** — the installed userscript auto-injects on the
+   report URLs and re-injects after every reload. Verify reachability instead:
+
+   ```js
+   // Tool call: world-isolation probe (3 lines)
+   ({ direct: typeof window.WLPayrollDriver,
+      version: window.WLPayrollDriver?.version,
+      panel: !!document.getElementById('wl-payroll-driver-panel') })
+   ```
+
+   - `direct: 'object'` + matching `version` → proceed; all driver calls work from `javascript_tool`.
+   - `direct: 'undefined'` but `panel: true` → the userscript ran but `javascript_tool` executes
+     in an isolated world that can't see the page's main world. Fallback: paste the entire
+     contents of `wl-payroll-driver.user.js` in a `javascript_tool` call to get a same-world
+     copy (must re-paste after each reload), and record the finding so we stop re-testing it.
+   - `direct: 'undefined'` and `panel: false` → userscript didn't run at all (not installed,
+     disabled, or URL not matching `@match`). Fix the install before automating.
 4. Driver lives on `window.WLPayrollDriver` for the remainder of the session.
 
 ## Phase 1: Scan-only audit (single page)
@@ -91,38 +106,32 @@ Run `WLPayrollDriver.checkAttendance()` separately for the Booked = Attended + L
 
 ## Phase 2: Auto-fix loop (per fixable row)
 
-For every row where `category === 'fixable'`, walk this 6-step sequence. Each step is a separate
-`javascript_tool` call — WL's async confirm-button render requires a real gap between trigger
-and select.
+**Recommended: one orchestrated call per fixable row.**
 
+```js
+// rowKey + expectedKeyword come from scan().rows[]
+await WLPayrollDriver.fixRow('jordan-loder|apr-18-2026-7-00pm|stream-radiance-flow', 'hybrid')
 ```
-# Step 1 — open the row's class popup (2a in skill)
-WLPayrollDriver.openRow('jordan-loder|apr-18-2026-7-00pm|stream-radiance-flow')
 
-# Step 2 — find the substitution container ID (2b)
-WLPayrollDriver.findSubContainerId()
-# → { ok: true, id: '409512', containerId: 'rs-staff_substitution-view-409512' }
+`fixRow` internally runs: open popup → **verify popup `k_class_period` + `dt_date` match the
+targeted row** (blocks the stale-recurring-popup save) → trigger Quick Sub → select rate →
+**`saveQuickSubDirect()` (AJAX `staffSubstituteSave`, the primary save path)** → button-click
+`confirm()` only if the page AJAX object is unavailable → toast check. It owns the async waits,
+so a single tool call is safe.
 
-# Step 3 — trigger QUICK Substitution (2c)
-WLPayrollDriver.triggerQuickSub('409512')
-# IMPORTANT: do NOT combine this with step 5 — WL renders the confirm button
-# asynchronously and the click will silently fail.
+Returns `{ok, phase, saveMode, selected, toast}`:
+- `ok: true, saveMode: 'direct-ajax'` — normal success.
+- `ok: true, saveMode: 'button-fallback'` — saved, but via the fallback; worth noting in the report.
+- `ok: false, phase: '...'` — `phase` names the failed step (`open`, `verify-popup`, `find`,
+  `trigger`, `select`, `save`, `confirm`).
 
-# Step 4 — verify the confirm button is rendered before proceeding
-WLPayrollDriver.isConfirmReady()
-# → { ok: true, ready: true } — proceed
-# → { ok: true, ready: false, reason: '...' } — wait and re-check, max 3 tries
+Every attempt is appended to the persistent fix log: `getFixLog()` / `exportFixLog()`.
 
-# Step 5 — select the correct pay rate from the dropdown (2d)
-WLPayrollDriver.selectPayRate('hybrid')  // pass the row's expectedKeyword
-
-# Step 6 — confirm (2e)
-WLPayrollDriver.confirm()
-
-# Step 7 — verify success toast appeared
-WLPayrollDriver.checkSuccessToast()
-# → { ok: true, found: true, text: 'Staff member has been changed successfully' }
-```
+**Debug only — stepwise primitives.** If a row keeps failing and you need to isolate the phase,
+run the primitives in separate `javascript_tool` calls (WL renders the confirm form
+asynchronously; combining trigger + select/confirm in one call fails silently):
+`openRow(key)` → `findSubContainerId()` → `triggerQuickSub(id)` → `isConfirmReady()` (wait/retry
+max 3) → `selectPayRate(keyword)` → `saveQuickSubDirect()` → `checkSuccessToast()`.
 
 If any step returns `{ok: false, ...}`, log the row's `key` and the error to a skipped-rows
 list and continue with the next fixable row. Do not retry automatically — a structural failure
@@ -157,7 +166,8 @@ Report back to user:
 | `findSubContainerId` returns no element | Popup didn't open — `openRow` link selector wrong or row not on current page | Verify row key matches a scanned row; check popup is actually visible |
 | `selectPayRate` returns "select not found" | Quick Sub form not yet rendered — step 4 verification skipped | Re-run `isConfirmReady`, wait, retry |
 | `selectPayRate` returns "no option matching keyword" — see availableOptions in error | WL rate option text changed | Update CASCADE keywords in driver |
-| `confirm` returns "no visible primary button" | Same async render race — confirm called too early | Verify `isConfirmReady` returns `ready: true` before calling |
+| `confirm` returns `.js-button-apply not found` / `still visibility:hidden` | Quick Sub form not rendered yet — same async race — or `triggerQuickSub` never ran | Verify `isConfirmReady` returns `ready: true` before calling; note `confirm` is fallback-only — `saveQuickSubDirect` is the primary save |
+| `fixRow` returns `saveMode: 'button-fallback'` | Page AJAX object (`AAjax.method`) unavailable to the driver | Save still succeeded; if persistent across rows, investigate why the page world lost `AAjax` |
 | Fix fails with `opened popup date ... expected ...` | WL kept or reopened a stale class popup for a different recurring date | Close the popup, rescan, and retry the row; the driver blocks the save before calling WL |
 | Save returns `class-period-date-out` / "Selected date does not belong to class period" | The popup date and selected row date do not match the class period being saved | Rescan after reload; row identity must include both `k_class_period` and `dt_date` |
 

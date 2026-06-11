@@ -3,6 +3,14 @@
 This skill covers the monthly payroll audit and pay rate correction workflow for Pure Bliss Yoga's
 Payroll Details report in WellnessLiving.
 
+> **Implementation contract — read before editing this file.**
+> This document is the *spec*: business rules, the report DOM data model, and the workflow.
+> The *implementation* (CSS selectors, AJAX endpoints, async timing, popup sequencing) lives in
+> exactly one place: `wl-payroll-driver.user.js`. Do not copy selector-level or endpoint-level
+> code into this file or the playbook — call the driver API by name instead. When the driver's
+> behavior changes, only its JSDoc must change; this file changes only when the business rules
+> or the report DOM contract change. `scripts/check-docs-drift.sh` enforces this.
+
 ## Pay Rate Rules
 
 **Top-level rule:** no class has a blank pay rate. Use the cascade below to determine what each row's rate should be — the first matching condition wins, and the same expected value drives both "what to set if blank/wrong" and "is the current rate correct?"
@@ -19,6 +27,10 @@ Payroll Details report in WellnessLiving.
 | 6 | Default (everything else) | `45-60 minute In-Person Class` |
 
 **ERYT variants** of any in-person rate (e.g. `45-60 minute In-Person Class (500HR E-RYT Teacher)`) are legitimate for certified instructors and still pass the keyword match.
+
+This cascade is implemented as the `CASCADE` array in `wl-payroll-driver.user.js`. If a rule
+changes, update **both** this table and that array in the same commit — this is the one
+intentional spec/implementation duplication in the repo.
 
 ### Non-cascade flags (handled separately)
 
@@ -59,208 +71,98 @@ Data rows have class `js-content-row`; the header row has `js-header-row`. The D
 `"Booked: 10, Attended: 5, No-shows: 0, Late cancels: 0"` — use this for attendance math
 rather than parsing individual numeric columns.
 
-## Step 1 — Scan All Pages for Issues
+---
 
-Before starting, check for pagination: if the report spans multiple pages, numbered pagination
-controls appear at the bottom of the table. If absent, it's a single page. Note the total page
-count so you know how many times to run the checker below.
+## Setup — getting the driver onto the page
 
-Paste this checker into the browser console once per page, navigating through all pages via the
-pagination controls. Collect results from every page before fixing anything — this gives a full
-picture first.
+**Primary (normal case):** `wl-payroll-driver.user.js` is installed as a Violentmonkey/Tampermonkey
+userscript (install from
+`https://raw.githubusercontent.com/brianlamb/wl-studio-ops/main/wl-payroll-driver.user.js`).
+Its `@match` rules auto-inject it on the payroll report pages and re-run it after every reload —
+no per-page paste. The API is exposed on both `window.WLPayrollDriver` and
+`unsafeWindow.WLPayrollDriver`; a floating operator panel also appears on the report.
+
+**Fallback (no userscript manager):** paste the entire contents of `wl-payroll-driver.user.js`
+into the browser console once per page load. Everything below works identically, but you must
+re-paste after any reload.
+
+Sanity check before starting:
 
 ```javascript
-window._checkPayRates = function() {
-  const rows = document.querySelectorAll('tr.js-content-row');
-  const getText = (row, name) =>
-    row.querySelector(`td[data-name="${name}"]`)?.innerText?.trim() || '';
-
-  const issues = [];
-  rows.forEach((row) => {
-    const staff = getText(row, 'o_staff_member');
-    if (!staff) return;
-    const payRate     = getText(row, 'text_pay_rate');
-    const serviceType = getText(row, 'text_service_type');
-    const details     = getText(row, 'o_service');
-    const date        = getText(row, 'o_date_add');
-
-    const dl  = details.toLowerCase();
-    const prl = payRate.toLowerCase();
-
-    const isPureBlissStaff     = staff.toLowerCase().includes('pure bliss staff');
-    const isAppointmentOrEvent = serviceType === 'Appointment' || serviceType === 'Event';
-    const isCommunity          = dl.includes('community');
-    const isLivestream         = dl.startsWith('stream:');
-    const isAerial             = dl.includes('aerial');
-    const isAshtanga           = dl.includes('ashtanga');
-    const is75min              = dl.includes('75min') || dl.includes('75 min');
-
-    // Priority cascade: first match wins (only meaningful for Service Type = 'Class')
-    let expectedKeyword, expectedLabel;
-    if (isCommunity)       { expectedKeyword = 'community';  expectedLabel = 'Community Rate'; }
-    else if (isLivestream) { expectedKeyword = 'hybrid';     expectedLabel = 'Livestream (Hybrid) Rate'; }
-    else if (isAerial)     { expectedKeyword = 'aerial';     expectedLabel = 'Aerial Rate'; }
-    else if (isAshtanga)   { expectedKeyword = '75-90';      expectedLabel = '75-90 minute In-Person Class (500 ERYT)'; }
-    else if (is75min)      { expectedKeyword = '75';         expectedLabel = '75 min In-Person Class'; }
-    else                   { expectedKeyword = '45-60';      expectedLabel = '45-60 minute In-Person Class'; }
-
-    let issue = null;
-    if (isPureBlissStaff) {
-      issue = '🚨 MISSING INSTRUCTOR — "Pure Bliss Staff" placeholder, reassign before payroll';
-    }
-    else if (isAppointmentOrEvent) {
-      issue = `ℹ️ REVIEW — ${serviceType} with variable/percentage rate, verify manually`;
-    }
-    else if (!payRate) {
-      issue = '🚨 BLANK pay rate — should be: "' + expectedLabel + '"';
-    }
-    else if (!prl.includes(expectedKeyword)) {
-      issue = '🚨 Wrong rate → expected "' + expectedLabel + '", is: "' + payRate + '"';
-    }
-
-    if (issue) issues.push({
-      staff, serviceType,
-      expected: serviceType === 'Class' ? expectedLabel : '—',
-      payRate: payRate || '(blank)', details, date, issue
-    });
-  });
-  return issues;
-};
-
-console.table(_checkPayRates());
+WLPayrollDriver.version   // should match the @version in the installed userscript
 ```
 
----
+If this is `undefined` in a Chrome MCP `javascript_tool` call but the operator panel is visible,
+you are in a world-isolation situation — see the playbook's verification section.
+
+## Step 1 — Scan All Pages for Issues
+
+Check for pagination first: if the report spans multiple pages, numbered pagination controls
+appear at the bottom of the table. Pagination is not yet automated (driver `getPaginationInfo()`
+is a stub) — advance pages manually and scan each one. Collect results from every page before
+fixing anything.
+
+Per page:
+
+```javascript
+WLPayrollDriver.scan()             // classify every row: fixable / manual / ok
+WLPayrollDriver.checkAttendance()  // Booked = Attended + LateCx + NoShows reconciliation
+```
+
+`scan()` returns `{ok, totalRows, fixable, manual, ok_, rows}`; each row carries
+`{key, staff, serviceType, payRate, details, date, expected, expectedKeyword, category, severity, issue}`.
+The `key` and `expectedKeyword` are the inputs to the fix step. Helpers:
+`getFixable()`, `getManualReview()`, `getIssues()`, `highlightIssues()`,
+`openManualReviewTabs()`, `openReconciliationTabs()`.
 
 ## Step 2 — Fix a Pay Rate (Quick Substitution)
 
-### Why direct clicking doesn't work
+### Why the driver, not direct UI automation
 
-Two quirks make pixel-clicking unreliable:
-1. The 3-dots (⋮) substitution button is hidden unless the row is CSS-hovered — JS mouse events
-   don't trigger CSS `:hover`, so the button stays invisible.
-2. Dispatching a `click` event with `bubbles:true` on anything inside the popup triggers the
-   document-level outside-click handler, which closes the popup immediately.
+WellnessLiving's popup UI is hostile to naive scripting: the substitution button only appears on
+CSS `:hover` (JS events don't trigger it), bubbling click events hit a document-level
+outside-click handler that closes the popup, the confirm form renders asynchronously, and the
+"primary" button styling is shared with an unrelated navigation button. The driver encapsulates
+all of this; the saved knowledge lives in its JSDoc, not here.
 
-**The solution**: skip clicking the button entirely and call the QUICK Substitution dropdown
-item's built-in `onclick` handler directly.
+### How a fix commits (important for verification)
 
-### Full fix sequence — run these steps in order
+The driver's **primary save path is the same `staffSubstituteSave` AJAX call WL's own apply
+button makes** — guarded so it refuses to save when the open popup's class period or date
+doesn't match the targeted row (recurring classes can open a stale popup for a different date).
+A UI button-click is used only as an automatic fallback when the page's AJAX object is
+unavailable. The fix result reports which path ran via `saveMode: 'direct-ajax' | 'button-fallback'`.
 
-#### 2a. Open the class popup
-
-```javascript
-// Adjust the match strings to target the exact row (class name + date)
-const rows = document.querySelectorAll('table tbody tr');
-rows.forEach(row => {
-  const cells = row.querySelectorAll('td');
-  if (cells.length < 10) return;
-  const details = cells[9]?.innerText?.trim() || '';
-  const date = cells[10]?.innerText?.trim() || '';
-  // Example: targeting a specific stream class on Mar 26
-  if (details.toLowerCase().startsWith('stream: radiance flow')
-      && date.includes('Mar 26') && date.includes('6:30pm')) {
-    const link = cells[9].querySelector('a');
-    if (link) link.click();
-  }
-});
-```
-
-Take a screenshot to confirm the popup appeared.
-
-#### 2b. Find the substitution container ID
-
-The numeric class visit ID is embedded in DOM element IDs. Find it once after the popup opens:
+### Recommended: one call per row
 
 ```javascript
-document.querySelectorAll('[id*="staff_substitution"]')
-// Returns elements like: rs-staff_substitution-view-409512-button
-//                         rs-staff_substitution-view-409512
-// The number (409512 here) is the ID you need.
+// rowKey and expectedKeyword come straight from scan().rows[]
+await WLPayrollDriver.fixRow(rowKey, expectedKeyword)
 ```
 
-#### 2c. Trigger QUICK Substitution
+`fixRow` runs the whole guarded sequence (open popup → verify period/date → trigger Quick Sub →
+select rate → AJAX save → toast check) and returns `{ok, phase, saveMode, selected, toast}` —
+on failure, `phase` names the step that failed. Every attempt is recorded in the fix log
+(`getFixLog()` / `exportFixLog()`).
 
-Call the `onclick` handler directly on the QUICK Substitution list item — **do not** dispatch
-a click event, as that will bubble up and close the popup:
+With the operator panel, the equivalent is the per-row **Set `<rate>`** button, which shows a
+native confirmation dialog before changing anything.
 
-```javascript
-const dropdownContainer = document.getElementById('rs-staff_substitution-view-409512');
-// ↑ replace 409512 with your actual ID
+### Advanced: stepwise primitives (debugging only)
 
-const items = dropdownContainer.querySelectorAll('li');
-const quickSub = Array.from(items).find(li =>
-  (li.getAttribute('data-title') || '').toUpperCase().includes('QUICK')
-);
-if (quickSub) quickSub.onclick.call(quickSub, new MouseEvent('click'));
-```
+When `fixRow` fails and you need to isolate the failing phase, the primitives are
+`openRow(key)` → `findSubContainerId()` → `triggerQuickSub(id)` → `isConfirmReady()` →
+`selectPayRate(keyword)` → `saveQuickSubDirect()` (or `confirm()` as button fallback) →
+`checkSuccessToast()`. Each must be a **separate** `javascript_tool` call — WL renders the
+confirm form asynchronously, and combining trigger + confirm in one call fails silently.
+See the playbook's Phase 2 section for the orchestrated sequence and failure table.
 
-**Critical — run this as a SEPARATE call and wait for it to complete before proceeding.**
-WellnessLiving shows the confirm buttons asynchronously after the onclick fires. The buttons
-start as `display:none / visibility:hidden` and are revealed by WL's JS after a tick. If you
-combine trigger + confirm in the same call the button can appear reachable while the form is not
-ready, which can cause a silent failed save or a stale popup interaction.
+### After fixing
 
-Verify the form is ready before moving to 2d:
-
-```javascript
-// Run this in a separate call — should return true before proceeding
-const popup = document.querySelector('.css-sg-second.rs-class-view-ti, [class*="rs-class-view"]');
-const primaryBtn = Array.from(popup.querySelectorAll('button'))
-  .find(b => b.className.includes('css-btn-filled-primary'));
-const style = primaryBtn ? window.getComputedStyle(primaryBtn) : null;
-style && style.visibility === 'visible' && style.display !== 'none';
-// Must return true before running 2d
-```
-
-#### 2d. Select the correct pay rate
-
-```javascript
-const popup = document.querySelector('.css-sg-second.rs-class-view-ti, [class*="rs-class-view"]');
-const selects = popup ? popup.querySelectorAll('select') : document.querySelectorAll('select');
-const paySelect = Array.from(selects).find(s => s.name === 'k_staff_pay');
-
-// Pick the right search term based on the priority rules above:
-//   Aerial     → 'aerial'
-//   Community  → 'community'
-//   Livestream → 'livestream'
-//   Ashtanga   → '75-90'
-//   75 min     → '75'
-//   45-60 min  → '45-60'
-const target = Array.from(paySelect.options).find(o =>
-  o.text.toLowerCase().includes('livestream')   // ← change this
-);
-
-if (target) {
-  paySelect.value = target.value;
-  paySelect.dispatchEvent(new Event('change', {bubbles: true}));
-  paySelect.dispatchEvent(new Event('input',  {bubbles: true}));
-  console.log('Selected:', target.text);
-}
-```
-
-#### 2e. Confirm (click the blue checkmark)
-
-```javascript
-const popup = document.querySelector('.css-sg-second.rs-class-view-ti, [class*="rs-class-view"]');
-// Use computed style check — offsetParent alone is not enough; button can have offsetParent
-// while still visibility:hidden (WL's async render sequence)
-const primaryBtn = Array.from(popup.querySelectorAll('button')).find(b => {
-  if (!b.className.includes('css-btn-filled-primary')) return false;
-  const s = window.getComputedStyle(b);
-  return s.visibility === 'visible' && s.display !== 'none';
-});
-if (primaryBtn) {
-  primaryBtn.dispatchEvent(new MouseEvent('mousedown', {bubbles:true, cancelable:true}));
-  primaryBtn.dispatchEvent(new MouseEvent('mouseup',   {bubbles:true, cancelable:true}));
-  primaryBtn.dispatchEvent(new MouseEvent('click',     {bubbles:true, cancelable:true}));
-}
-```
-
-**Success indicator**: green toast at top of page — *"Staff member has been changed successfully"*
-
-Repeat steps 2a–2e for each remaining issue. After all fixes on a page, refresh and re-run
-`_checkPayRates()` to verify the page is clean before moving on.
+**Success indicator:** green toast — *"Staff member has been changed successfully"* — plus
+`saveMode` in the `fixRow` result. After all fixes on a page, `WLPayrollDriver.refreshReport()`
+(the report table caches server data), then re-run `scan()` and confirm the fixed rows moved to
+`ok`. The userscript auto-re-injects after the reload.
 
 **Note on Pure Bliss Staff rows**: these can't be fixed by selecting a pay rate — the staff
 member itself needs to be reassigned via the full Substitution flow (not Quick Substitution),
@@ -269,57 +171,25 @@ from the pay-rate fixes.
 
 ---
 
-## Common Issues Reference
-
-| Symptom | Cause | Fix |
-|---|---|---|
-| Popup closes the moment you click anything in it | Event bubbling hits document outside-click handler | Use `li.onclick.call(...)` instead of dispatching click events |
-| 3-dots button reports `offsetParent === null` | CSS `:hover` hides it; JS mouseover doesn't trigger CSS hover | Skip clicking 3-dots — go straight to the dropdown container |
-| "Selected date does not belong to class period" error | Popup date and selected row date/class period do not match, often from a stale popup on recurring classes | Close the popup, rescan, and retry; the driver should verify both `k_class_period` and `dt_date` before saving |
-| Two sets of 3-dots visible in popup | Top-right ⋮ = class-level actions; inline ⋮ = staff pay substitution | Always target `[id*="staff_substitution"]` |
-| Table sorts unexpectedly after fix | Pagination click lands on column header | After page navigation re-sort by clicking the Staff column header, or use `document.querySelector('td.css-column--o_staff_member').click()` |
-| Report shows stale data after fix | Page was not refreshed | `location.reload()` then re-run checker |
-
----
-
 ## Attendance Math Check
 
-In addition to pay rates, verify the attendance totals add up correctly:
+In addition to pay rates, verify the attendance totals add up:
 
 **Booked = Attended + Late Cancels + No Shows**
 
-The checker below reads from the Details cell's `data-title-backup` tooltip, which is a single
-authoritative string (`"Booked: X, Attended: Y, No-shows: Z, Late cancels: W"`). This avoids the
-"X - Y" total/unpaid split that can appear in the Attended column when a teacher attended a
-class as a guest (not paid for the visit).
+`WLPayrollDriver.checkAttendance()` reads each row's Details-cell `data-title-backup` tooltip
+(the single authoritative attendance string) rather than the numeric columns — this avoids the
+"X - Y" total/unpaid split that appears in the Attended column when a teacher attended a class
+as a guest. Rows whose tooltip can't be parsed are flagged as unreadable, not silently skipped.
+For rows with unresolved booked gaps, `openReconciliationTabs()` opens the roster pages for
+human review.
 
-```javascript
-window._checkAttendance = function() {
-  const rows = document.querySelectorAll('tr.js-content-row');
-  const getCell = (row, name) => row.querySelector(`td[data-name="${name}"]`);
-  const getText = (row, name) => getCell(row, name)?.innerText?.trim() || '';
+---
 
-  const errors = [];
-  rows.forEach((row) => {
-    const staff = getText(row, 'o_staff_member');
-    if (!staff) return;
+## Failure modes
 
-    const tipEl = getCell(row, 'o_service')?.querySelector('[data-title-backup]');
-    const tip = tipEl?.getAttribute('data-title-backup') || '';
-    const m = tip.match(/Booked:\s*(\d+).*?Attended:\s*(\d+).*?No-shows:\s*(\d+).*?Late cancels:\s*(\d+)/i);
-    if (!m) return;
-    const [, booked, attended, noShows, lateCx] = m.slice(1).map(Number);
-
-    if (booked !== attended + noShows + lateCx) {
-      errors.push({
-        staff, details: getText(row, 'o_service'),
-        date: getText(row, 'o_date_add'),
-        booked, attended, noShows, lateCx,
-        error: `${attended} + ${noShows} + ${lateCx} = ${attended + noShows + lateCx} ≠ Booked ${booked}`
-      });
-    }
-  });
-  return errors;
-};
-console.table(_checkAttendance());
-```
+The authoritative failure-mode table (symptom → cause → recovery, per driver API call) is
+maintained in `wl-payroll-driver-playbook.md` — one table, one location. The short version:
+any `{ok: false}` from a fix step means stop, log the row key, and continue with the next row;
+structural failures (missing elements) usually mean WL changed their UI and the batch needs
+human review.
