@@ -10,7 +10,7 @@
 // @match       *://www.wellnessliving.com/Wl/Staff/Pay/Report/StaffPayDetailReport.html*
 // @grant       GM_openInTab
 // @grant       unsafeWindow
-// @version     1.5.1
+// @version     1.5.3
 // @description Payroll Details audit, review, and guarded pay-rate fixing for WellnessLiving
 // ==/UserScript==
 
@@ -33,7 +33,7 @@
  * the confirm buttons asynchronously after Quick Substitution is triggered; if
  * you combine trigger + confirm in one call, the click silently fails.
  *
- * Version: 1.5.1
+ * Version: 1.5.3
  */
 (function () {
   'use strict';
@@ -309,14 +309,14 @@
   FIX_LOG.load();
 
   // Class periods re-keyed server-side during this page load. WL's
-  // staffSubstituteSave SPLITS a recurring series on every successful save: the
-  // fixed date keeps its k_class_period, sibling dates are moved to NEW period
-  // ids (verified 2026-06-11: fixing (18062815, May 13) moved May 20/27 to
-  // 18064081). Every other row of that series still on the page then carries a
-  // stale period key — a further save through one either fails server-side
-  // ("class-period-date-out") or can be applied to a DIFFERENT date of the
-  // series (a May 14 fix landed on May 7). One fix per class period per page
-  // load; reload + rescan before touching the rest of the series.
+  // staffSubstituteSave SPLITS a recurring series on a successful save: the
+  // fixed date keeps its k_class_period, sibling dates move to NEW period ids
+  // (verified 2026-06-11: fixing (18062815, May 13) re-keyed May 20 to
+  // 18064081). Rows of that series still on the page then hold stale period
+  // keys; a save through one is refused server-side ("class-period-date-out")
+  // or accepted with the report only catching up on a later regeneration —
+  // saves were never observed landing on a wrong date. Refixes on touched
+  // periods are blocked until reload so every save uses a fresh id.
   const RELOAD_REQUIRED_PERIODS = new Set();
 
   // Snapshot of popup state for diagnosing phantom-row bugs. Captures the
@@ -383,7 +383,7 @@
 
   // -- Public API --
   const API = {
-    version: '1.5.1',
+    version: '1.5.3',
 
     /** Read-only: classify every row on the current page. */
     scan() {
@@ -401,6 +401,17 @@
         if (!staff) return;
         results.push(classifyRow(row));
       });
+      // Rows sharing a k_class_period are the re-key risk: saving one re-keys
+      // the others (sometimes minutes later, asynchronously). Fully fragmented
+      // single-date periods (sharedPeriodRows: 0) are stable across repeated
+      // saves and reverts — verified 2026-06-11 interleaved set/revert test.
+      const periodCounts = new Map();
+      for (const r of results) {
+        if (r.period) periodCounts.set(r.period, (periodCounts.get(r.period) || 0) + 1);
+      }
+      for (const r of results) {
+        r.sharedPeriodRows = r.period ? periodCounts.get(r.period) - 1 : 0;
+      }
       return {
         ok: true,
         mode,
@@ -429,11 +440,14 @@
 
     /**
      * Cross-reference the persistent fix log against the current page: a row whose
-     * earlier fix reported ok but that is STILL fixable after a reload means WL
-     * applied the save somewhere else — observed 2026-06-11: a fix for the May 14
-     * row of a series returned status ok but the rate change landed on May 7.
-     * Matching ignores the period id segment of the row key, because WL re-keys
-     * the series after each save and the id legitimately changes across reloads.
+     * earlier fix reported ok but that is STILL fixable after a reload. Most often
+     * this is delayed materialization — WL accepted the save but the regenerated
+     * report hasn't caught up yet (observed 2026-06-11: a May 14 fix reported ok
+     * at 10:03, the 10:35 report still showed the old rate, the 11:22 report
+     * showed it applied). Reload again before refixing; if the flag persists
+     * across regenerations, investigate before saving again. Matching ignores the
+     * period id segment of the row key, because WL re-keys series after saves and
+     * the id legitimately changes across reloads.
      */
     checkFixesStuck() {
       const prefixOf = (key) => String(key || '').split('|').slice(0, 3).join('|');
@@ -450,8 +464,8 @@
           details: r.details,
           period: r.period,
           fixReportedAt: okFixes.get(prefixOf(r.key)).ts,
-          warning: 'earlier fix reported ok but this rate is still wrong — WL may have applied it to a ' +
-            'different date of this class series; check sibling dates before refixing',
+          warning: 'earlier fix reported ok but this rate still shows wrong — usually the report has not ' +
+            'caught up with the save yet; reload again before refixing, and investigate if it persists',
         }));
       return { ok: true, count: rows.length, rows };
     },
@@ -1402,8 +1416,9 @@
           <div class="wlpd-main">${escapeHtml(row.staff)} - ${escapeHtml(row.date)}</div>
           <div class="wlpd-meta">${escapeHtml(row.details)}</div>
           ${row.period ? `<div class="wlpd-meta">Class period ${escapeHtml(row.period)}${row.dateLocal ? ` / ${escapeHtml(row.dateLocal)}` : ''}</div>` : ''}
+          ${row.sharedPeriodRows ? `<div class="wlpd-meta" style="color:#92400e;font-weight:600;">Period shared with ${escapeHtml(row.sharedPeriodRows)} other row${row.sharedPeriodRows === 1 ? '' : 's'} — fixing one re-keys the rest; reload before fixing them</div>` : ''}
           <div class="wlpd-meta">${escapeHtml(row.issue || '')}</div>
-          ${stuckRow ? `<div class="wlpd-meta" style="color:#991b1b;font-weight:600;">Earlier fix reported ok but did not stick — check sibling dates of this series before refixing</div>` : ''}
+          ${stuckRow ? `<div class="wlpd-meta" style="color:#991b1b;font-weight:600;">Earlier fix reported ok but still shows wrong — report may not have caught up; reload again before refixing</div>` : ''}
           <div class="wlpd-row-actions" style="margin-top:7px;">
             <button data-action="open" data-key="${escapeHtml(row.key)}">Open</button>
             ${canFix ? `<button data-action="fix" data-primary="true" data-key="${escapeHtml(row.key)}">Set ${escapeHtml(row.expectedKeyword)}</button>` : ''}
@@ -1560,15 +1575,23 @@
         notifyPanel(`Fix failed at ${result.phase || 'unknown'}: ${result.error || 'unknown error'}`, tone);
         return;
       }
-      notifyPanel(`Fix saved: ${result.selected}. WL re-keyed this class series — reload before fixing more rows.`, 'warn');
+      const sharesPeriod = result.period
+        ? (UI.lastScan?.scan?.rows || []).some(r =>
+            r.key !== result.key && r.category === 'fixable' && r.period === result.period)
+        : false;
+      if (!sharesPeriod) {
+        notifyPanel(`Fix saved: ${result.selected}. Other rows can be fixed without reloading.`, 'info');
+        return;
+      }
+      notifyPanel(`Fix saved: ${result.selected}. Other fixable rows share this class period — reload before fixing them.`, 'warn');
       if (confirm([
         'Fix saved.',
         '',
-        'WellnessLiving re-keys the class series after every substitution save, so the',
-        'remaining rows of this series now carry stale period ids on this page.',
+        'Other fixable rows on this page share the class period just saved, and WL',
+        're-keys the series after a save — their period ids are now stale.',
         '',
         'Reload the report now? (Recommended. Cancel only to fix rows of OTHER classes;',
-        'same-series rows stay blocked until reload either way.)',
+        'same-period rows stay blocked until reload either way.)',
       ].join('\n'))) {
         API.refreshReport();
       }

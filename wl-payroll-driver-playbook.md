@@ -56,13 +56,32 @@ Pay-rate fixes now commit through the same `Wl\Classes\Period\Staff\Ajax::staffS
 method that the Quick Substitution apply button calls. The button-click path remains as a fallback,
 but the primary path avoids bubbling click events that can close the popup before the save settles.
 
-**One fix per class series per page load.** A successful save makes WL re-key the rest of that
+**One fix per class period per page load.** A successful save makes WL re-key the rest of that
 recurring series: the fixed date keeps its `k_class_period`, sibling dates move to brand-new
-period ids (verified 2026-06-11 on the May report). Same-series rows still on the page then hold
-stale period keys, and further saves through them either fail with `class-period-date-out` or can
-be applied to a different date of the series. The driver tracks touched periods and refuses
-repeat fixes (`phase: 'reload-required'`); the panel prompts to reload after every successful
-fix. Reload + rescan, then continue with the next row.
+period ids (verified 2026-06-11 on the May report). Rows still on the page that share the saved
+period then hold stale keys; further saves through them are refused with `class-period-date-out`
+or accepted with the report catching up on a later regeneration — never observed landing on a
+wrong date. The driver tracks touched periods and refuses repeat fixes (`phase:
+'reload-required'`); the panel prompts to reload only when other fixable rows share the saved
+period. Rows of different periods can be fixed back-to-back without reloading — WL fragments
+long-running series over time, so same-class sibling dates often already carry distinct ids.
+`scan()` exposes the risk upfront via `sharedPeriodRows` per row (0 = single-date period, safe).
+
+What the 2026-06-11 interleaved set/revert test established, and what is still open:
+
+- Single-date periods are stable: repeated saves and reverts against the same (period, date) —
+  nine in one session, both pay directions, driver and native interleaved — all succeeded with
+  no side effects and no re-keying.
+- Re-keys happen only off saves against periods that still span multiple dates, but they can
+  complete **asynchronously** — one observed re-key materialized in a window with no adjacent
+  save, minutes after the triggering fix. A `class-period-date-out` can therefore appear even on
+  a freshly loaded page; the recovery is unchanged (reload, rescan, retry).
+- Report rate display lags accepted saves by anywhere from ~30 seconds to ~45 minutes.
+- Unexplained: one stale-period save was soft-accepted (status ok, applied correctly, late)
+  while another was hard-refused (`class-period-date-out`). Both behaviors are handled, but the
+  server's rule for choosing between them is not pinned down — keep the fix log when it recurs.
+- Payload note: WL's native button sends `uid_staff` as a number, the driver as a string; the
+  server accepts both.
 
 ## Claude/Chrome MCP setup (per session)
 
@@ -189,9 +208,9 @@ Report back to user:
 | `confirm` returns `.js-button-apply not found` / `still visibility:hidden` | Quick Sub form not rendered yet — same async race — or `triggerQuickSub` never ran | Verify `isConfirmReady` returns `ready: true` before calling; note `confirm` is fallback-only — `saveQuickSubDirect` is the primary save |
 | `fixRow` returns `saveMode: 'button-fallback'` | Page AJAX object (`AAjax.method`) unavailable to the driver | Save still succeeded; if persistent across rows, investigate why the page world lost `AAjax` |
 | Fix fails with `opened popup date ... expected ...` | WL kept or reopened a stale class popup for a different recurring date | Close the popup, rescan, and retry the row; the driver blocks the save before calling WL |
-| Save returns `class-period-date-out` / "Selected date does not belong to class period" | The row's period id is stale — WL re-keyed the series after an earlier fix (or a schedule edit); the date no longer belongs to that period | Reload + rescan to pick up the new period id, then retry; the driver marks the period reload-required automatically |
+| Save returns `class-period-date-out` / "Selected date does not belong to class period" | The row's period id is stale — WL re-keyed the series after an earlier fix (or a schedule edit); the date no longer belongs to that period. Re-keys can complete asynchronously minutes after the triggering save, so this can hit even a freshly loaded page | Reload + rescan to pick up the new period id, then retry; the driver marks the period reload-required automatically |
 | Fix fails with `phase: 'reload-required'` | The driver already fixed a row of this class series this page load — remaining sibling rows hold stale period ids | Not an error: reload + rescan, then fix the row with its fresh period id |
-| Fix reported ok but the row is still fixable after reload (`checkFixesStuck()` flags it) | WL applied the save to a different date of the series — its report row carried a (period, date) pair the save endpoint resolved to another occurrence | Check the sibling dates of that series for an unintended rate change, correct manually via the class popup, then refix the intended row from a freshly reloaded page |
+| Fix reported ok but the row is still fixable after reload (`checkFixesStuck()` flags it) | Delayed materialization — WL accepted the save but the regenerated report has not caught up yet (observed: ok at 10:03, still stale at 10:35, applied by 11:22) | Reload again later and rescan before refixing; if the flag persists across regenerations, investigate the row manually via the class popup |
 
 ## Next steps for this driver
 

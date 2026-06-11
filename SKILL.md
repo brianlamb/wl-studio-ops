@@ -162,20 +162,23 @@ See the playbook's Phase 2 section for the orchestrated sequence and failure tab
 **Success indicator:** green toast — *"Staff member has been changed successfully"* — plus
 `saveMode` in the `fixRow` result.
 
-**One fix per class series per page load — reload after every successful fix.** A successful
-save makes WellnessLiving re-key the rest of that recurring series: the fixed date keeps its
-`k_class_period`, every sibling date is moved to a brand-new period id (verified June 2026
-against the May report). Rows of the same series still on the page then carry stale period keys —
-saving through one either fails server-side (`class-period-date-out`) or, worse, can be applied
-to a **different date** of the series. The driver tracks the periods it has touched and refuses
+**One fix per class period per page load.** A successful save makes WellnessLiving re-key the
+rest of that recurring series: the fixed date keeps its `k_class_period`, sibling dates move to
+brand-new period ids (verified June 2026 against the May report). Rows still on the page that
+share the saved period then carry stale keys — saving through one is refused server-side
+(`class-period-date-out`), or accepted with the report only catching up on a later regeneration.
+Saves were never observed landing on a wrong date. The driver tracks touched periods and refuses
 repeat fixes (`phase: 'reload-required'`) until the page is reloaded; `fixRow` success results
-carry `reloadRequired: true`, and the panel offers the reload right after each fix.
+carry `reloadRequired: true`, and the panel offers the reload when other fixable rows share the
+saved period. Rows of **different** periods can be fixed back-to-back without reloading — note
+that WL fragments long-running series over time, so sibling dates of the same weekly class often
+already have distinct period ids, which is why manual one-by-one fixing on a fresh page works.
 
 After reloading, re-run `scan()` — fixed rows move to `ok` and remaining rows come back with
 fresh period ids. The scan also runs `checkFixesStuck()`, which cross-references the persistent
-fix log: any row whose earlier fix reported ok but is **still fixable** means WL applied that
-save to a different date of the series — investigate the sibling dates before refixing. The
-userscript auto-re-injects after the reload.
+fix log: a row whose earlier fix reported ok but is **still fixable** usually means the report
+has not caught up with the accepted save yet — reload again before refixing, and investigate if
+it persists across regenerations. The userscript auto-re-injects after the reload.
 
 **Note on Pure Bliss Staff rows**: these can't be fixed by selecting a pay rate — the staff
 member itself needs to be reassigned via the full Substitution flow (not Quick Substitution),
