@@ -3,3 +3,4 @@
 .env.*
 !.env.example
 reference/
+.claude/settings.local.json
