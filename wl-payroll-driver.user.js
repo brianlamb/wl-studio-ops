@@ -10,7 +10,7 @@
 // @match       *://www.wellnessliving.com/Wl/Staff/Pay/Report/StaffPayDetailReport.html*
 // @grant       GM_openInTab
 // @grant       unsafeWindow
-// @version     1.4.1
+// @version     1.4.2
 // @description Payroll Details audit, review, and guarded pay-rate fixing for WellnessLiving
 // ==/UserScript==
 
@@ -20,16 +20,20 @@
  * Stateless JS library that exposes a clean API for Chrome MCP-driven automation
  * of the monthly payroll audit at Pure Bliss Yoga.
  *
- * Usage: paste this whole file into the browser console once per page. All methods
- * live under `window.WLPayrollDriver`. Each call is idempotent; state lives in the
- * DOM, not in this module.
+ * Injection: install as a userscript (Violentmonkey/Tampermonkey). The @match
+ * patterns auto-inject this on the three payroll report URLs and re-run it after
+ * every reload, so no per-page paste is needed. The API is exposed on both
+ * `window.WLPayrollDriver` and `unsafeWindow.WLPayrollDriver` (the latter is what
+ * page-context console / Chrome MCP javascript_tool reach). Console-paste still
+ * works as a dev fallback when the manager isn't available. Each call is
+ * idempotent; state lives in the DOM, not in this module.
  *
  * Orchestration model: each "step" of the fix sequence must be invoked in a
  * SEPARATE tool call (Chrome MCP javascript_tool). WellnessLiving's UI renders
  * the confirm buttons asynchronously after Quick Substitution is triggered; if
  * you combine trigger + confirm in one call, the click silently fails.
  *
- * Version: 1.4.1
+ * Version: 1.4.2
  */
 (function () {
   'use strict';
@@ -324,7 +328,7 @@
 
   // -- Public API --
   const API = {
-    version: '1.4.1',
+    version: '1.4.2',
 
     /** Read-only: classify every row on the current page. */
     scan() {
@@ -942,7 +946,9 @@
      * Reload the report page to pull fresh server-side data. The Payroll Details
      * table caches rows from when the report was generated, so post-fix changes
      * don't appear until the page is reloaded. Use this after a batch of fixes.
-     * NOTE: this also wipes window.WLPayrollDriver — caller must re-inject.
+     * NOTE: reload tears down this instance, but the @match userscript re-injects
+     * automatically on the fresh page (the URL still matches). Manual re-injection
+     * is only needed under the console-paste dev fallback.
      */
     refreshReport() {
       location.reload();
