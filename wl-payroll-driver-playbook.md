@@ -84,6 +84,11 @@ What the 2026-06-11 interleaved set/revert test established, and what is still o
 - The save observer feeds successful and refused native saves into the same reload-required
   ledger the driver uses, so manual clicks and driver fixes share one staleness source of truth
   and the panel warns when a manual save makes sibling rows stale.
+- WL's own stale-link recovery endpoint (`Wl\Login\Attendance::findNewPeriod`) resolves the
+  canonical period id for a (date, period) pair read-only — `resolvePeriod()` and
+  `verifyRowIds()` wrap it, and `fixRow` preflights with it (auto-heal saves with the canonical
+  id when enabled). A banner observer additionally counts every date-out banner WL displays,
+  regardless of which flow raised it (`banner-observed` fix-log entries).
 - Payload note: WL's native button sends `uid_staff` as a number, the driver as a string; the
   server accepts both.
 
@@ -150,13 +155,23 @@ targeted row** (blocks the stale-recurring-popup save) → trigger Quick Sub →
 `confirm()` only if the page AJAX object is unavailable → toast check. It owns the async waits,
 so a single tool call is safe.
 
-Returns `{ok, phase, saveMode, selected, reloadRequired, toast}`:
+`fixRow` first preflights the row's (date, period) against WL's stale-link resolver
+(`resolvePeriod`). If the page id drifted: with the **Auto-heal drifted ids** setting on (or
+`fixRow(key, keyword, {autoHeal: true})`), the save goes out with the resolved canonical id —
+no reload needed; with it off (default), the fix aborts with `phase: 'drift-detected'` and the
+canonical id in the result. A resolver failure is treated as unknown and falls through to the
+normal guarded save. `verifyRowIds()` runs the same check across all fixable rows up front
+(panel: **Verify ids**).
+
+Returns `{ok, phase, saveMode, selected, reloadRequired, healed, periodUsed, toast}`:
 - `ok: true, saveMode: 'direct-ajax'` — normal success. `reloadRequired: true` means what it
   says: reload + rescan before the next fix (WL re-keyed the series — see above).
+  `healed: true` means the save used the resolved canonical period id, not the page's.
 - `ok: true, saveMode: 'button-fallback'` — saved, but via the fallback; worth noting in the report.
-- `ok: false, phase: '...'` — `phase` names the failed step (`reload-required`, `open`,
-  `verify-popup`, `find`, `trigger`, `select`, `save`, `confirm`). `reload-required` is not an
-  error — it is the driver refusing to reuse a period id it already touched this page load.
+- `ok: false, phase: '...'` — `phase` names the failed step (`reload-required`,
+  `drift-detected`, `open`, `verify-popup`, `find`, `trigger`, `select`, `save`, `confirm`).
+  `reload-required` and `drift-detected` are not errors — the driver is refusing a save it
+  knows would use a stale period id.
 
 Every attempt is appended to the persistent fix log: `getFixLog()` / `exportFixLog()` — including
 early-phase aborts (`fix-abort` entries) and refused/failed saves. The driver also passively
@@ -214,6 +229,8 @@ Report back to user:
 | Fix fails with `opened popup date ... expected ...` | WL kept or reopened a stale class popup for a different recurring date | Close the popup, rescan, and retry the row; the driver blocks the save before calling WL |
 | Save returns `class-period-date-out` / "Selected date does not belong to class period" | The row's period id is stale — WL re-keyed the series after an earlier fix (or a schedule edit); the date no longer belongs to that period. Re-keys can complete asynchronously minutes after the triggering save, so this can hit even a freshly loaded page | Reload + rescan to pick up the new period id, then retry; the driver marks the period reload-required automatically |
 | Fix fails with `phase: 'reload-required'` | The driver already fixed a row of this class series this page load — remaining sibling rows hold stale period ids | Not an error: reload + rescan, then fix the row with its fresh period id |
+| Fix fails with `phase: 'drift-detected'` | The preflight resolver says the row's page period id is stale; the canonical id is in the result | Enable the Auto-heal drifted ids setting (saves with the canonical id, date guards unchanged), or reload + rescan |
+| Panel shows a `Date-out N` pill | N "date does not belong to class period" banners were observed this page load, from any source (manual clicks included); each adds its popup's period to the reload-required ledger | Reload before retrying those rows; export the fix log if N keeps growing |
 | Fix reported ok but the row is still fixable after reload (`checkFixesStuck()` flags it) | Delayed materialization — WL accepted the save but the regenerated report has not caught up yet (observed: ok at 10:03, still stale at 10:35, applied by 11:22) | Reload again later and rescan before refixing; if the flag persists across regenerations, investigate the row manually via the class popup |
 
 ## Next steps for this driver

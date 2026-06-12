@@ -180,6 +180,18 @@ fix log: a row whose earlier fix reported ok but is **still fixable** usually me
 has not caught up with the accepted save yet — reload again before refixing, and investigate if
 it persists across regenerations. The userscript auto-re-injects after the reload.
 
+### Drift verification and auto-heal (no reload required)
+
+Staleness can also be checked **authoritatively without reloading**: `resolvePeriod(dateLocal,
+period)` asks WL's own stale-link resolver for the canonical period id, and `verifyRowIds()`
+sweeps the fixable rows (panel: **Verify ids**; drifted rows get a red badge with the canonical
+id). `fixRow` preflights every fix with the same resolver. With the **Auto-heal drifted ids**
+setting enabled, a fix whose page id is stale saves with the resolved canonical id instead of
+failing — the date guards are unchanged, so a wrong-date write remains impossible. With it
+disabled (the default), drifted rows are blocked (`phase: 'drift-detected'`) until a reload.
+Every "date does not belong to class period" banner WL shows — from any flow, manual clicks
+included — is counted on the panel and recorded in the fix log.
+
 **Note on Pure Bliss Staff rows**: these can't be fixed by selecting a pay rate — the staff
 member itself needs to be reassigned via the full Substitution flow (not Quick Substitution),
 since you're picking a real instructor, not just adjusting the rate. Handle these separately

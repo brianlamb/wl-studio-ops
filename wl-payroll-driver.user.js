@@ -10,7 +10,7 @@
 // @match       *://www.wellnessliving.com/Wl/Staff/Pay/Report/StaffPayDetailReport.html*
 // @grant       GM_openInTab
 // @grant       unsafeWindow
-// @version     1.5.4
+// @version     1.6.0
 // @description Payroll Details audit, review, and guarded pay-rate fixing for WellnessLiving
 // ==/UserScript==
 
@@ -33,7 +33,7 @@
  * the confirm buttons asynchronously after Quick Substitution is triggered; if
  * you combine trigger + confirm in one call, the click silently fails.
  *
- * Version: 1.5.4
+ * Version: 1.6.0
  */
 (function () {
   'use strict';
@@ -319,6 +319,14 @@
   // periods are blocked until reload so every save uses a fresh id.
   const RELOAD_REQUIRED_PERIODS = new Set();
 
+  // "Selected date does not belong to class period." banners seen this page
+  // load, from ANY source (manual clicks included). Surfaced as a panel pill.
+  let SESSION_DATE_OUT_COUNT = 0;
+
+  // `${period}|${dateLocal}` -> canonical period id, filled by resolvePeriod()
+  // and verifyRowIds(). Page-load lifetime, like RELOAD_REQUIRED_PERIODS.
+  const DRIFT_MAP = new Map();
+
   // Snapshot of popup state for diagnosing phantom-row bugs. Captures the
   // attributes the save payload is built from so we can spot mismatches.
   function capturePopupSnapshot() {
@@ -397,9 +405,47 @@
     if (attempt < 40) setTimeout(() => armNativeSaveObserver(attempt + 1), 500);
   })();
 
+  // -- Passive banner observer --
+  // MpNote.show(message, type) is WL's single banner API ('error'|'note'|'ok').
+  // Wrapping it captures every banner from every flow — including date-out
+  // refusals raised by paths the AAjax observer's method filter doesn't cover.
+  // Observation must never break the page's banner display.
+  function installBannerObserver() {
+    const note = PAGE.MpNote;
+    if (!note || typeof note.show !== 'function') return false;
+    if (note.show.wlPayrollObserved) return true;
+    const original = note.show;
+    const wrapped = function (message, type) {
+      try {
+        const text = String(message ?? '').slice(0, 300);
+        const snapshot = capturePopupSnapshot();
+        FIX_LOG.push({ phase: 'banner-observed', text, bannerType: type || null, snapshot });
+        if (/does not belong to class period/i.test(text)) {
+          SESSION_DATE_OUT_COUNT++;
+          if (snapshot.popupPeriod) RELOAD_REQUIRED_PERIODS.add(snapshot.popupPeriod);
+          notifyPanel(
+            `Date-out refusal #${SESSION_DATE_OUT_COUNT} observed` +
+            (snapshot.popupPeriod ? ` — period ${snapshot.popupPeriod} is stale; reload before retrying it.` : '.'),
+            'warn'
+          );
+        }
+      } catch (e) { /* observation must never break the page banner */ }
+      return original.apply(this, arguments);
+    };
+    wrapped.wlPayrollObserved = true;
+    note.show = wrapped;
+    return true;
+  }
+
+  // MpNote may not exist yet at userscript injection time — retry until armed.
+  (function armBannerObserver(attempt = 0) {
+    if (installBannerObserver()) return;
+    if (attempt < 40) setTimeout(() => armBannerObserver(attempt + 1), 500);
+  })();
+
   // -- Public API --
   const API = {
-    version: '1.5.4',
+    version: '1.6.0',
 
     /** Read-only: classify every row on the current page. */
     scan() {
@@ -484,6 +530,104 @@
             'caught up with the save yet; reload again before refixing, and investigate if it persists',
         }));
       return { ok: true, count: rows.length, rows };
+    },
+
+    /**
+     * Read-only: resolve the CANONICAL class period id for a (date, period)
+     * pair using WL's own stale-link recovery endpoint
+     * (Wl\Login\Attendance::findNewPeriod — the page uses it to repair
+     * attendance URLs whose period was re-keyed). Response semantics:
+     * url_attendance present -> the URL embeds the canonical k_class_period
+     * (drifted when it differs from the asked id); ok without url_attendance
+     * -> the pair is current. Anything else -> unknown, never authoritative.
+     */
+    resolvePeriod(dateLocal, periodId) {
+      const dt = normalizeDateLocal(dateLocal);
+      const period = String(periodId || '');
+      if (!dt || !period) {
+        return Promise.resolve({ ok: false, unknown: true, error: 'resolvePeriod requires dateLocal and periodId' });
+      }
+      if (!PAGE.AAjax || typeof PAGE.AAjax.method !== 'function') {
+        return Promise.resolve({ ok: false, unknown: true, error: 'AAjax.method not available' });
+      }
+      FIX_LOG.push({ phase: 'resolve-request', dateLocal: dt, period });
+      return new Promise(resolve => {
+        let settled = false;
+        const finish = (result) => {
+          if (settled) return;
+          settled = true;
+          FIX_LOG.push({
+            phase: 'resolve-result', dateLocal: dt, period,
+            drifted: result.drifted ?? null,
+            canonicalPeriod: result.canonicalPeriod || null,
+            unknown: result.unknown || false,
+            error: result.error || null,
+          });
+          if (result.drifted === true && result.canonicalPeriod) {
+            DRIFT_MAP.set(`${period}|${dt}`, result.canonicalPeriod);
+          }
+          resolve(result);
+        };
+        try {
+          PAGE.AAjax.method({
+            a_data: { dt_date: dt, k_class_period: period },
+            call_success(_sender, response) {
+              const url = response?.url_attendance || '';
+              if (url) {
+                const canonical = getUrlParam(url, 'k_class_period');
+                if (canonical && canonical !== period) {
+                  finish({ ok: true, drifted: true, canonicalPeriod: canonical, urlAttendance: url });
+                } else if (canonical) {
+                  finish({ ok: true, drifted: false, canonicalPeriod: canonical });
+                } else {
+                  finish({ ok: true, drifted: null, unknown: true, error: 'url_attendance present but no k_class_period parsed' });
+                }
+              } else {
+                const status = response?.s_status || response?.status || '';
+                if (status === 'ok' || !status) {
+                  finish({ ok: true, drifted: false, canonicalPeriod: period });
+                } else {
+                  finish({ ok: true, drifted: null, unknown: true, status, error: `resolver returned status "${status}"` });
+                }
+              }
+            },
+            call_fail(_sender, response) {
+              finish({ ok: false, drifted: null, unknown: true, error: 'resolver request failed', response });
+            },
+            s_method: 'Wl\\Login\\Attendance::findNewPeriod',
+          });
+        } catch (e) {
+          finish({ ok: false, drifted: null, unknown: true, error: `resolver threw: ${e.message}` });
+        }
+        setTimeout(() => finish({ ok: false, drifted: null, unknown: true, error: 'resolver timed out' }), 12000);
+      });
+    },
+
+    /**
+     * Authoritative drift sweep: resolve the canonical period id for scanned
+     * rows and report which page ids are stale. scope 'fixable' (default)
+     * checks only rows the cascade wants to fix; 'all' checks every row with
+     * a (period, date) identity. Sequential, ~0.3s per row.
+     */
+    async verifyRowIds(scope = 'fixable') {
+      const scan = this.scan();
+      if (scan.mode !== 'detail') return { ok: false, error: 'id verification requires the detail report' };
+      const rows = scan.rows.filter(r => r.period && r.dateLocal && (scope === 'all' || r.category === 'fixable'));
+      const drifted = [];
+      const unknown = [];
+      for (const row of rows) {
+        const probe = await this.resolvePeriod(row.dateLocal, row.period);
+        if (probe.ok && probe.drifted === true) {
+          drifted.push({
+            key: row.key, staff: row.staff, date: row.date, details: row.details,
+            period: row.period, canonicalPeriod: probe.canonicalPeriod,
+          });
+        } else if (!probe.ok || probe.unknown) {
+          unknown.push({ key: row.key, period: row.period, error: probe.error || null });
+        }
+        await sleep(250);
+      }
+      return { ok: true, scope, checked: rows.length, drifted, unknown };
     },
 
     /**
@@ -909,8 +1053,17 @@
     /**
      * Commit Quick Substitution through the same AJAX endpoint WL's apply button
      * uses, without dispatching a bubbling click that can close the popup first.
+     *
+     * canonicalPeriodOverride (auto-heal): when the page's period id is stale
+     * and resolvePeriod() returned the canonical id, the override replaces
+     * ONLY the payload's k_class_period. The popup/holder/period guards still
+     * compare the popup against the page row (stale == stale, by design), and
+     * the DATE guards stay fully strict — the override never touches dates, so
+     * a wrong-date write remains impossible; a wrong override id is refused
+     * server-side (date-out) without writing. k_staff/k_staff_pay ids are
+     * business-global, safe to send under a different period id.
      */
-    saveQuickSubDirect(expectedPayValue = null, expectedDateLocal = null, expectedPeriod = null) {
+    saveQuickSubDirect(expectedPayValue = null, expectedDateLocal = null, expectedPeriod = null, canonicalPeriodOverride = null) {
       const popup = getVisibleClassPopup();
       if (!popup) return Promise.resolve({ ok: false, error: 'popup not present' });
       if (!PAGE.AAjax || typeof PAGE.AAjax.method !== 'function') {
@@ -952,6 +1105,7 @@
         return refuse(`save refused: internal period mismatch — shown staff ${currentPeriod}, popup ${popupPeriod}`, { popupPeriod });
       }
       const dateLocal = normalizedExpected;
+      const savePeriod = canonicalPeriodOverride || currentPeriod;
 
       const holder = staffContainer.querySelector(`.js-class-quick-holder--${currentPeriod}-${currentStaff}`) ||
         Array.from(staffContainer.querySelectorAll('.js-class-quick-one-holder')).find(el =>
@@ -984,16 +1138,21 @@
       const payload = {
         a_staff: staffPayload,
         dt_date_local: dateLocal,
-        k_class_period: currentPeriod,
+        k_class_period: savePeriod,
       };
-      FIX_LOG.push({ phase: 'save-payload', payload, snapshot: capturePopupSnapshot() });
+      FIX_LOG.push({
+        phase: 'save-payload',
+        payload,
+        periodOverride: canonicalPeriodOverride ? { from: currentPeriod, to: canonicalPeriodOverride } : null,
+        snapshot: capturePopupSnapshot(),
+      });
 
       return new Promise(resolve => {
         let settled = false;
         const finish = (result) => {
           if (settled) return;
           settled = true;
-          FIX_LOG.push({ phase: 'save-result', ok: result.ok, error: result.error || null, status: result.status || null, period: currentPeriod, dateLocal });
+          FIX_LOG.push({ phase: 'save-result', ok: result.ok, error: result.error || null, status: result.status || null, period: savePeriod, healed: Boolean(canonicalPeriodOverride), dateLocal });
           resolve(result);
         };
         try {
@@ -1004,6 +1163,7 @@
               const status = response?.s_status || response?.status || '';
               if (status === 'ok') {
                 RELOAD_REQUIRED_PERIODS.add(currentPeriod);
+                if (canonicalPeriodOverride) RELOAD_REQUIRED_PERIODS.add(canonicalPeriodOverride);
                 const selectedPay = paySelect.selectedOptions?.[0];
                 const staffName = staffSelect.selectedOptions?.[0]?.textContent?.trim() || '';
                 const payTitle = selectedPay?.getAttribute('data-title') || selectedPay?.textContent?.trim() || '';
@@ -1012,15 +1172,16 @@
                 staffSelect.dataset.staff = staffSelect.value;
                 staffSelect.dataset.pay = paySelect.value;
                 holder.querySelector('.js-buttons-container')?.style.setProperty('display', 'none');
-                finish({ ok: true, status, period: currentPeriod, dateLocal, selected: payTitle, value: paySelect.value });
+                finish({ ok: true, status, period: savePeriod, periodUsed: savePeriod, healed: Boolean(canonicalPeriodOverride), dateLocal, selected: payTitle, value: paySelect.value });
               } else if (status === 'class-period-date-out') {
                 holder.querySelector('.js-buttons-container')?.style.removeProperty('display');
                 RELOAD_REQUIRED_PERIODS.add(currentPeriod);
+                if (canonicalPeriodOverride) RELOAD_REQUIRED_PERIODS.add(canonicalPeriodOverride);
                 finish({
                   ok: false,
                   status,
                   staleClassPeriod: true,
-                  error: `WL refused: ${dateLocal} no longer belongs to class period ${currentPeriod} — ` +
+                  error: `WL refused: ${dateLocal} no longer belongs to class period ${savePeriod} — ` +
                     'the series was re-keyed by an earlier fix or a schedule edit. Reload the report and ' +
                     'rescan to pick up the new period id, then retry this row.',
                   response,
@@ -1098,8 +1259,12 @@
      *
      * @param {string} rowKey - from scan().rows[].key
      * @param {string} keyword - one of 'community', 'hybrid', 'aerial', '75-90', '75', '45-60'
+     * @param {object} [options] - {autoHeal}: override the Auto-heal panel
+     *   setting for this call. When the preflight resolver reports the row's
+     *   period id drifted: autoHeal on -> save with the canonical id;
+     *   off -> abort with phase 'drift-detected'.
      */
-    async fixRow(rowKey, keyword) {
+    async fixRow(rowKey, keyword, options = {}) {
       const row = getRowByKey(rowKey);
       const expectedPeriod = row ? getRowPeriod(row) : '';
       const expectedDateLocal = row ? getRowDateLocal(row) : '';
@@ -1119,6 +1284,29 @@
           error: `class period ${expectedPeriod} was re-keyed by an earlier fix this page load — ` +
             'reload the report and rescan before fixing this row',
         });
+      }
+      // Drift preflight: ask WL's resolver whether the page's period id is
+      // still canonical. Unknown/unreachable resolver falls through to the
+      // existing guarded behavior — the preflight only ever tightens safety.
+      let canonicalOverride = null;
+      if (expectedPeriod && expectedDateLocal) {
+        const autoHeal = options.autoHeal ?? UI.settings.autoHealDrift;
+        const probe = await this.resolvePeriod(expectedDateLocal, expectedPeriod);
+        if (probe.ok && probe.drifted === true && probe.canonicalPeriod) {
+          if (!autoHeal) {
+            return abort({
+              ok: false,
+              phase: 'drift-detected',
+              key: rowKey,
+              period: expectedPeriod,
+              canonicalPeriod: probe.canonicalPeriod,
+              error: `page period id ${expectedPeriod} is stale (canonical ${probe.canonicalPeriod}) — ` +
+                'reload the report, or enable the Auto-heal drifted ids setting',
+            });
+          }
+          canonicalOverride = probe.canonicalPeriod;
+          FIX_LOG.push({ phase: 'fix-heal', rowKey, keyword, from: expectedPeriod, to: canonicalOverride });
+        }
       }
       const open = this.openRow(rowKey);
       if (!open.ok) return abort({ ok: false, phase: 'open', key: rowKey, ...open });
@@ -1153,7 +1341,7 @@
       const sel = this.selectPayRate(keyword);
       if (!sel.ok) return abort({ ok: false, phase: 'select', key: rowKey, visitId: id.id, ...sel });
       await sleep(150);
-      const direct = await this.saveQuickSubDirect(sel.value, expectedDateLocal, expectedPeriod);
+      const direct = await this.saveQuickSubDirect(sel.value, expectedDateLocal, expectedPeriod, canonicalOverride);
       if (!direct.ok && direct.error !== 'AAjax.method not available') {
         const failed = { phase: 'save', key: rowKey, visitId: id.id, selected: sel.selected, ...direct };
         FIX_LOG.push({ phase: 'fix-end', rowKey, keyword, ok: false, error: direct.error });
@@ -1168,7 +1356,7 @@
       }
       await sleep(800);
       const toast = this.checkSuccessToast();
-      FIX_LOG.push({ phase: 'fix-end', rowKey, keyword, ok: true, saveMode: direct.ok ? 'direct-ajax' : 'button-fallback', selected: direct.selected || sel.selected });
+      FIX_LOG.push({ phase: 'fix-end', rowKey, keyword, ok: true, saveMode: direct.ok ? 'direct-ajax' : 'button-fallback', selected: direct.selected || sel.selected, healed: direct.healed || false });
       return {
         ok: true,
         key: rowKey,
@@ -1177,6 +1365,8 @@
         saveMode: direct.ok ? 'direct-ajax' : 'button-fallback',
         reloadRequired: true,
         period: expectedPeriod || null,
+        healed: direct.healed || false,
+        periodUsed: direct.periodUsed || null,
         toast,
       };
     },
@@ -1228,6 +1418,7 @@
     lastScan: null,
     settings: {
       skipFixConfirm: loadSetting('skipFixConfirm', false),
+      autoHealDrift: loadSetting('autoHealDrift', false),
     },
   };
 
@@ -1421,12 +1612,15 @@
       `<span class="wlpd-pill" data-tone="${attErrors.length ? 'bad' : 'ok'}">Attendance errors ${attErrors.length}</span>`,
       ...(attSkipped.length ? [`<span class="wlpd-pill" data-tone="warn">Unreadable ${attSkipped.length}</span>`] : []),
       ...(stuckByKey.size ? [`<span class="wlpd-pill" data-tone="bad">Did not stick ${stuckByKey.size}</span>`] : []),
+      ...(SESSION_DATE_OUT_COUNT ? [`<span class="wlpd-pill" data-tone="bad">Date-out ${SESSION_DATE_OUT_COUNT}</span>`] : []),
+      ...(DRIFT_MAP.size ? [`<span class="wlpd-pill" data-tone="bad">Drifted ${DRIFT_MAP.size}</span>`] : []),
     ].join('');
 
     const parts = [];
     for (const row of issueRows) {
       const canFix = row.category === 'fixable';
       const stuckRow = stuckByKey.get(row.key);
+      const driftCanonical = row.period && row.dateLocal ? DRIFT_MAP.get(`${row.period}|${row.dateLocal}`) : null;
       parts.push(`
         <div class="wlpd-issue" data-category="${escapeHtml(row.category)}" data-key="${escapeHtml(row.key)}">
           <div class="wlpd-main">${escapeHtml(row.staff)} - ${escapeHtml(row.date)}</div>
@@ -1435,6 +1629,7 @@
           ${row.sharedPeriodRows ? `<div class="wlpd-meta" style="color:#92400e;font-weight:600;">Period shared with ${escapeHtml(row.sharedPeriodRows)} other row${row.sharedPeriodRows === 1 ? '' : 's'} — fixing one re-keys the rest; reload before fixing them</div>` : ''}
           <div class="wlpd-meta">${escapeHtml(row.issue || '')}</div>
           ${stuckRow ? `<div class="wlpd-meta" style="color:#991b1b;font-weight:600;">Earlier fix reported ok but still shows wrong — report may not have caught up; reload again before refixing</div>` : ''}
+          ${driftCanonical ? `<div class="wlpd-meta" style="color:#991b1b;font-weight:600;">ID drifted — canonical period ${escapeHtml(driftCanonical)}; auto-heal or reload</div>` : ''}
           <div class="wlpd-row-actions" style="margin-top:7px;">
             <button data-action="open" data-key="${escapeHtml(row.key)}">Open</button>
             ${canFix ? `<button data-action="fix" data-primary="true" data-key="${escapeHtml(row.key)}">Set ${escapeHtml(row.expectedKeyword)}</button>` : ''}
@@ -1525,6 +1720,23 @@
       notifyPanel(`Opened ${result.opened} roster tabs in background.`);
       return;
     }
+    if (action === 'verify-ids') {
+      button.disabled = true;
+      notifyPanel('Verifying period ids against WL…');
+      const result = await API.verifyRowIds('fixable');
+      button.disabled = false;
+      if (!result.ok) {
+        notifyPanel(`Id verification failed: ${result.error}`, 'error');
+        return;
+      }
+      if (UI.lastScan) renderPanel(UI.lastScan.scan, UI.lastScan.attendance, UI.lastScan.stuck);
+      const unknownNote = result.unknown.length ? `, ${result.unknown.length} unknown` : '';
+      notifyPanel(result.drifted.length
+        ? `Id check: ${result.drifted.length} of ${result.checked} fixable rows DRIFTED${unknownNote} — auto-heal or reload before fixing them.`
+        : `Id check: all ${result.checked} fixable row ids are current${unknownNote}.`,
+        result.drifted.length ? 'warn' : 'info');
+      return;
+    }
     if (action === 'refresh') {
       if (confirm('Reload the Payroll Details report now? The userscript will reattach after reload.')) {
         API.refreshReport();
@@ -1596,10 +1808,10 @@
             r.key !== result.key && r.category === 'fixable' && r.period === result.period)
         : false;
       if (!sharesPeriod) {
-        notifyPanel(`Fix saved: ${result.selected}. Other rows can be fixed without reloading.`, 'info');
+        notifyPanel(`Fix saved: ${result.selected}.${result.healed ? ` Healed: saved with canonical period ${result.periodUsed}.` : ''} Other rows can be fixed without reloading.`, 'info');
         return;
       }
-      notifyPanel(`Fix saved: ${result.selected}. Other fixable rows share this class period — reload before fixing them.`, 'warn');
+      notifyPanel(`Fix saved: ${result.selected}.${result.healed ? ` Healed: saved with canonical period ${result.periodUsed}.` : ''} Other fixable rows share this class period — reload before fixing them.`, 'warn');
       if (confirm([
         'Fix saved.',
         '',
@@ -1624,6 +1836,13 @@
         ? 'Fix confirmation is disabled.'
         : 'Fix confirmation is enabled.');
     }
+    if (input.dataset.setting === 'auto-heal-drift') {
+      UI.settings.autoHealDrift = input.checked;
+      saveSetting('autoHealDrift', UI.settings.autoHealDrift);
+      notifyPanel(UI.settings.autoHealDrift
+        ? 'Auto-heal is ON: fixes on drifted rows save with the resolved canonical period id.'
+        : 'Auto-heal is OFF: fixes on drifted rows are blocked until reload.');
+    }
   }
 
   function installPanel(options = {}) {
@@ -1647,12 +1866,17 @@
             <button data-action="highlight">Highlight</button>
             <button data-action="manual-tabs">Manual tabs</button>
             <button data-action="reconcile-tabs">Roster tabs</button>
+            <button data-action="verify-ids" title="Authoritative period-id check via WL's resolver">Verify ids</button>
             <button data-action="refresh">Reload</button>
             <button data-action="export-log" title="Copy fix log JSON to clipboard">Export log</button>
             <button data-action="toggle-investigate" title="Show phantom-row debug tip">Phantom tip</button>
             <label class="wlpd-option">
               <input type="checkbox" data-setting="skip-fix-confirm" ${UI.settings.skipFixConfirm ? 'checked' : ''}>
               Skip fix confirm
+            </label>
+            <label class="wlpd-option" title="When a fix's period id is stale, save with the resolved canonical id instead of blocking">
+              <input type="checkbox" data-setting="auto-heal-drift" ${UI.settings.autoHealDrift ? 'checked' : ''}>
+              Auto-heal drifted ids
             </label>
           </div>
           <div class="wlpd-investigate" hidden>
