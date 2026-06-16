@@ -15,6 +15,8 @@ Payroll Details report in WellnessLiving.
 
 **Top-level rule:** no class has a blank pay rate. Use the cascade below to determine what each row's rate should be — the first matching condition wins, and the same expected value drives both "what to set if blank/wrong" and "is the current rate correct?"
 
+**The default (priority 6) only fills blanks — it never flags a non-blank rate as wrong.** A row that matches no specific keyword carries no reliable signal, so a rate the studio already set is trusted; the `45-60` default is used only to *fill a blank*. Only the specific rules (priorities 1–5, including the `75` length match) flag a non-blank rate as wrong.
+
 ### Priority cascade (first match wins)
 
 | Priority | Detection | Expected pay rate |
@@ -23,7 +25,7 @@ Payroll Details report in WellnessLiving.
 | 2 | Details starts with `Stream:` | `Livestream (Hybrid) Rate` |
 | 3 | Details contains `aerial` | `Aerial Rate` |
 | 4 | Details contains `ashtanga` | `75-90 minute In-Person Class (500 ERYT)` |
-| 5 | Details contains `75min` / `75 min` | `75 min In-Person Class` |
+| 5 | Details contains `75` | `75 min In-Person Class` |
 | 6 | Default (everything else) | `45-60 minute In-Person Class` |
 
 **ERYT variants** of any in-person rate (e.g. `45-60 minute In-Person Class (500HR E-RYT Teacher)`) are legitimate for certified instructors and still pass the keyword match.
@@ -36,6 +38,7 @@ intentional spec/implementation duplication in the repo.
 
 - **Staff column = `Pure Bliss Staff`** — substitute placeholder, not a real instructor. Flag "missing instructor — reassign before payroll" regardless of rate. Cannot be fixed via Quick Substitution (a real person needs to be picked through the full Substitution flow first).
 - **Private sessions / appointments / events** — variable rates that can't be predicted by the cascade. Flag for manual review only; do NOT validate rate.
+- **`Hourly` pay rate** — non-class compensation (subbing / coverage / admin time), not a class. Always valid; never flag against the class-rate cascade, whatever the row's details say.
 
 ### Ordering rationale and tie-breakers
 

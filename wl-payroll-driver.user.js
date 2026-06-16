@@ -10,7 +10,7 @@
 // @match       *://www.wellnessliving.com/Wl/Staff/Pay/Report/StaffPayDetailReport.html*
 // @grant       GM_openInTab
 // @grant       unsafeWindow
-// @version     1.6.0
+// @version     1.7.0
 // @description Payroll Details audit, review, and guarded pay-rate fixing for WellnessLiving
 // ==/UserScript==
 
@@ -33,7 +33,7 @@
  * the confirm buttons asynchronously after Quick Substitution is triggered; if
  * you combine trigger + confirm in one call, the click silently fails.
  *
- * Version: 1.6.0
+ * Version: 1.7.0
  */
 (function () {
   'use strict';
@@ -68,8 +68,11 @@
       payRateTest: prl => prl.includes('75-90') && prl.includes('500') && prl.includes('eryt'),
       optionTest: optionText => optionText.includes('75-90') && optionText.includes('500') && optionText.includes('eryt'),
     },
-    { test: dl => dl.includes('75min') || dl.includes('75 min'), keyword: '75',      label: '75 min In-Person Class' },
-    { test: () => true,                                        keyword: '45-60',     label: '45-60 minute In-Person Class' },
+    { test: dl => dl.includes('75'),                           keyword: '75',      label: '75 min In-Person Class' },
+    // Catch-all default. `isDefault` marks it a guess used ONLY to fill a BLANK
+    // rate — a specifically-identified class flags a non-blank wrong rate, but
+    // this default never does, so a rate the studio already set is trusted.
+    { test: () => true,                                        keyword: '45-60',     label: '45-60 minute In-Person Class', isDefault: true },
   ];
 
   // -- Helpers --
@@ -152,6 +155,12 @@
     // Priority cascade — first match wins (only meaningful for Service Type 'Class')
     const matched = CASCADE.find(rule => rule.test(dl));
     const expected = matched ? { keyword: matched.keyword, label: matched.label } : null;
+    // Only a specifically-identified class (75/community/aerial/ashtanga/livestream)
+    // flags a non-blank wrong rate; the catch-all default (isDefault) just fills blanks.
+    const matchedSpecific = Boolean(matched && !matched.isDefault);
+    // Hourly pay is a non-class compensation (subbing/coverage/admin time), not
+    // a class-rate error — never flag it, whatever the row's details say.
+    const isHourlyRate = prl.includes('hourly');
 
     let category = null;   // 'fixable' | 'manual' | 'ok'
     let issue    = null;
@@ -165,11 +174,13 @@
       category = 'manual';
       severity = 'review';
       issue = `${serviceType} with variable/percentage rate — verify manually`;
+    } else if (isHourlyRate) {
+      category = 'ok';
     } else if (!payRate) {
       category = 'fixable';
       severity = 'error';
       issue = `BLANK pay rate — should be: "${expected.label}"`;
-    } else if (expected && !(matched.payRateTest ? matched.payRateTest(prl) : prl.includes(expected.keyword))) {
+    } else if (matchedSpecific && !(matched.payRateTest ? matched.payRateTest(prl) : prl.includes(expected.keyword))) {
       category = 'fixable';
       severity = 'error';
       issue = `Wrong rate — expected "${expected.label}", is: "${payRate}"`;
@@ -445,7 +456,7 @@
 
   // -- Public API --
   const API = {
-    version: '1.6.0',
+    version: '1.7.0',
 
     /** Read-only: classify every row on the current page. */
     scan() {
@@ -1419,6 +1430,7 @@
     settings: {
       skipFixConfirm: loadSetting('skipFixConfirm', false),
       autoHealDrift: loadSetting('autoHealDrift', false),
+      remindReload: loadSetting('remindReload', true),
     },
   };
 
@@ -1812,7 +1824,10 @@
         return;
       }
       notifyPanel(`Fix saved: ${result.selected}.${result.healed ? ` Healed: saved with canonical period ${result.periodUsed}.` : ''} Other fixable rows share this class period — reload before fixing them.`, 'warn');
-      if (confirm([
+      // The blocking reload prompt is a convenience only — RELOAD_REQUIRED_PERIODS
+      // already refuses further same-period saves until reload, so suppressing the
+      // modal (Reload reminders off) is safe; the warn note above still informs.
+      if (UI.settings.remindReload && confirm([
         'Fix saved.',
         '',
         'Other fixable rows on this page share the class period just saved, and WL',
@@ -1842,6 +1857,13 @@
       notifyPanel(UI.settings.autoHealDrift
         ? 'Auto-heal is ON: fixes on drifted rows save with the resolved canonical period id.'
         : 'Auto-heal is OFF: fixes on drifted rows are blocked until reload.');
+    }
+    if (input.dataset.setting === 'remind-reload') {
+      UI.settings.remindReload = input.checked;
+      saveSetting('remindReload', UI.settings.remindReload);
+      notifyPanel(UI.settings.remindReload
+        ? 'Reload reminders are ON: a fix that re-keys a shared class period prompts to reload.'
+        : 'Reload reminders are OFF: same-period rows still stay blocked until you reload manually.');
     }
   }
 
@@ -1877,6 +1899,10 @@
             <label class="wlpd-option" title="When a fix's period id is stale, save with the resolved canonical id instead of blocking">
               <input type="checkbox" data-setting="auto-heal-drift" ${UI.settings.autoHealDrift ? 'checked' : ''}>
               Auto-heal drifted ids
+            </label>
+            <label class="wlpd-option" title="Show the blocking 'reload now?' prompt after a fix that re-keys a shared class period. Off drops the modal only — stale same-period saves stay blocked until you reload.">
+              <input type="checkbox" data-setting="remind-reload" ${UI.settings.remindReload ? 'checked' : ''}>
+              Reload reminders
             </label>
           </div>
           <div class="wlpd-investigate" hidden>
