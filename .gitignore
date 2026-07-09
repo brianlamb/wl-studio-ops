@@ -6,3 +6,10 @@ reference/
 .claude/settings.local.json
 # vendored WellnessLiving PHP SDK — evaluated read-only, see sdk_payrate_eval.md
 wl-sdk/
+
+# --- harness-local (shared scaffold) ---
+.claude/settings.local.json
+.gemini/oauth*
+.codex/
+*.log
+.DS_Store
