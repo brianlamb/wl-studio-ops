@@ -10,7 +10,7 @@
 // @match       *://www.wellnessliving.com/Wl/Staff/Pay/Report/StaffPayDetailReport.html*
 // @grant       GM_openInTab
 // @grant       unsafeWindow
-// @version     1.7.0
+// @version     1.7.2
 // @description Payroll Details audit, review, and guarded pay-rate fixing for WellnessLiving
 // ==/UserScript==
 
@@ -33,7 +33,7 @@
  * the confirm buttons asynchronously after Quick Substitution is triggered; if
  * you combine trigger + confirm in one call, the click silently fails.
  *
- * Version: 1.7.0
+ * Version: 1.7.2
  */
 (function () {
   'use strict';
@@ -67,6 +67,11 @@
       label: '75-90 minute In-Person Class (500 ERYT)',
       payRateTest: prl => prl.includes('75-90') && prl.includes('500') && prl.includes('eryt'),
       optionTest: optionText => optionText.includes('75-90') && optionText.includes('500') && optionText.includes('eryt'),
+    },
+    {
+      test: dl => dl.includes('radiance flow') && !dl.includes('75'),
+      keyword: '45-60',
+      label: '45-60 minute In-Person Class',
     },
     { test: dl => dl.includes('75'),                           keyword: '75',      label: '75 min In-Person Class' },
     // Catch-all default. `isDefault` marks it a guess used ONLY to fill a BLANK
@@ -150,12 +155,14 @@
     const prl = payRate.toLowerCase();
 
     const isPureBlissStaff     = staff.toLowerCase().includes('pure bliss staff');
+    const isPrivateSession     = dl.includes('private');
+    const isPrivateRate        = prl.includes('private');
     const isAppointmentOrEvent = serviceType === 'Appointment' || serviceType === 'Event';
 
     // Priority cascade — first match wins (only meaningful for Service Type 'Class')
     const matched = CASCADE.find(rule => rule.test(dl));
     const expected = matched ? { keyword: matched.keyword, label: matched.label } : null;
-    // Only a specifically-identified class (75/community/aerial/ashtanga/livestream)
+    // Only a specifically-identified class (75/community/aerial/ashtanga/livestream/Radiance Flow)
     // flags a non-blank wrong rate; the catch-all default (isDefault) just fills blanks.
     const matchedSpecific = Boolean(matched && !matched.isDefault);
     // Hourly pay is a non-class compensation (subbing/coverage/admin time), not
@@ -170,6 +177,14 @@
       category = 'manual';
       severity = 'error';
       issue = 'MISSING INSTRUCTOR — "Pure Bliss Staff" placeholder, reassign before payroll (cannot fix via Quick Sub)';
+    } else if (isPrivateSession && isPrivateRate) {
+      // Private is a known correct pairing even when the service type would
+      // otherwise send the row to manual appointment/event review.
+      category = 'ok';
+    } else if (isPrivateSession) {
+      category = 'manual';
+      severity = 'review';
+      issue = 'Private session without a Private pay rate — verify manually';
     } else if (isAppointmentOrEvent) {
       category = 'manual';
       severity = 'review';
@@ -456,7 +471,7 @@
 
   // -- Public API --
   const API = {
-    version: '1.7.0',
+    version: '1.7.2',
 
     /** Read-only: classify every row on the current page. */
     scan() {

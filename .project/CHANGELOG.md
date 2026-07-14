@@ -3,6 +3,20 @@
 Append-only session log, newest first. Entry format:
 `## YYYY-MM-DD — <harness/model> — <one-line summary>` followed by brief bullets.
 
+## 2026-07-14 — Codex / GPT-5 — Define the non-75 Radiance Flow rate
+- Added a specific cascade rule assigning non-75 Radiance Flow classes the
+  normal `45-60 minute In-Person Class` rate.
+- Kept Radiance Flow definitions containing `75` on the generic 75-minute rule
+  and added a docs/driver parity check for the distinction.
+- Bumped the userscript from v1.7.1 to v1.7.2.
+
+## 2026-07-13 — Codex / GPT-5 — Accept matched Private sessions and pay rates
+- Updated driver classification so a Private session with a Private pay rate is
+  valid, including Appointment/Event rows that would otherwise require review.
+- Private sessions with blank or non-Private rates remain manual-review items;
+  missing-instructor checks still take precedence.
+- Bumped the userscript from v1.7.0 to v1.7.1 and updated the business-rule spec.
+
 ## 2026-07-13 — Codex / GPT-5 — Initialized repository understanding and project map
 - Reviewed the userscript, spec, playbook, SDK evaluation, history, privacy
   boundary, shared project standards, and deployment metadata.

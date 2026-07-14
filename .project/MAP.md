@@ -6,7 +6,7 @@ structure changes.
 ## Runtime
 
 - `wl-payroll-driver.user.js` — the single browser implementation. It is a
-  Violentmonkey/Tampermonkey userscript (currently v1.7.0) that injects on
+  Violentmonkey/Tampermonkey userscript that injects on
   WellnessLiving payroll summary/detail reports, exposes
   `WLPayrollDriver`, and renders the floating operator panel.
 - Its major internal layers are: stable report-column selectors and pay-rate

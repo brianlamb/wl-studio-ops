@@ -2,12 +2,11 @@
 
 ## Current state
 Active WellnessLiving automation project; this repo supersedes the old
-attendance-payroll work. The current deliverable is WL Payroll Driver v1.7.0:
+attendance-payroll work. The current deliverable is WL Payroll Driver v1.7.2:
 a browser userscript, operator panel/console API, business-rule spec, and Chrome
 orchestration playbook for payroll-detail audits and guarded pay-rate fixes.
 
-The docs/driver drift check and JavaScript syntax check pass. Local `main` is
-one scaffold commit ahead of `origin/main` as of 2026-07-13.
+The docs/driver drift check and JavaScript syntax check pass.
 
 ## In flight
 Nothing active.

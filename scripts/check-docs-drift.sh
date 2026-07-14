@@ -46,8 +46,8 @@ if [[ -z "$ver" || "$n" -lt 3 ]]; then
   err "driver @version '$ver' found $n time(s) — expected 3 (header, JSDoc, API.version)"
 fi
 
-# 4. Cascade parity (spec vs implementation): the 6 expected rate labels in SKILL.md's
-#    cascade table must each appear in the driver's CASCADE array.
+# 4. Cascade parity (spec vs implementation): every expected rate label in
+#    SKILL.md's cascade table must appear in the driver's CASCADE array.
 for label in 'Community Rate' 'Livestream (Hybrid) Rate' 'Aerial Rate' \
              '75-90 minute In-Person Class (500 ERYT)' '75 min In-Person Class' \
              '45-60 minute In-Person Class'; do
@@ -55,7 +55,19 @@ for label in 'Community Rate' 'Livestream (Hybrid) Rate' 'Aerial Rate' \
   grep -qF "$label" "$driver"        || err "driver CASCADE missing label: $label"
 done
 
-# 5. Driver syntax.
+# 5. Radiance Flow rule parity.
+grep -qF 'radiance flow' "$repo/SKILL.md" || \
+  err "SKILL.md no longer documents the Radiance Flow pay-rate rule"
+grep -qF "dl.includes('radiance flow') && !dl.includes('75')" "$driver" || \
+  err "driver no longer routes non-75 Radiance Flow classes to the 45-60 rate"
+
+# 6. Private-session rule parity.
+grep -qF 'Private session' "$repo/SKILL.md" || \
+  err "SKILL.md no longer documents the Private-session pay-rate rule"
+grep -qF 'isPrivateSession && isPrivateRate' "$driver" || \
+  err "driver no longer accepts the valid Private-session / Private-rate pairing"
+
+# 7. Driver syntax.
 if command -v node >/dev/null 2>&1; then
   node --check "$driver" >/dev/null 2>&1 || err "node --check failed on wl-payroll-driver.user.js"
 fi

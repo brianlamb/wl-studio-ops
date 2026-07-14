@@ -15,7 +15,7 @@ Payroll Details report in WellnessLiving.
 
 **Top-level rule:** no class has a blank pay rate. Use the cascade below to determine what each row's rate should be — the first matching condition wins, and the same expected value drives both "what to set if blank/wrong" and "is the current rate correct?"
 
-**The default (priority 6) only fills blanks — it never flags a non-blank rate as wrong.** A row that matches no specific keyword carries no reliable signal, so a rate the studio already set is trusted; the `45-60` default is used only to *fill a blank*. Only the specific rules (priorities 1–5, including the `75` length match) flag a non-blank rate as wrong.
+**The default (priority 7) only fills blanks — it never flags a non-blank rate as wrong.** A row that matches no specific keyword carries no reliable signal, so a rate the studio already set is trusted; the `45-60` default is used only to *fill a blank*. Only the specific rules (priorities 1–6, including the Radiance Flow and `75` length matches) flag a non-blank rate as wrong.
 
 ### Priority cascade (first match wins)
 
@@ -25,8 +25,9 @@ Payroll Details report in WellnessLiving.
 | 2 | Details starts with `Stream:` | `Livestream (Hybrid) Rate` |
 | 3 | Details contains `aerial` | `Aerial Rate` |
 | 4 | Details contains `ashtanga` | `75-90 minute In-Person Class (500 ERYT)` |
-| 5 | Details contains `75` | `75 min In-Person Class` |
-| 6 | Default (everything else) | `45-60 minute In-Person Class` |
+| 5 | Details contains `radiance flow` and does **not** contain `75` | `45-60 minute In-Person Class` |
+| 6 | Details contains `75` | `75 min In-Person Class` |
+| 7 | Default (everything else) | `45-60 minute In-Person Class` |
 
 **ERYT variants** of any in-person rate (e.g. `45-60 minute In-Person Class (500HR E-RYT Teacher)`) are legitimate for certified instructors and still pass the keyword match.
 
@@ -37,7 +38,13 @@ intentional spec/implementation duplication in the repo.
 ### Non-cascade flags (handled separately)
 
 - **Staff column = `Pure Bliss Staff`** — substitute placeholder, not a real instructor. Flag "missing instructor — reassign before payroll" regardless of rate. Cannot be fixed via Quick Substitution (a real person needs to be picked through the full Substitution flow first).
-- **Private sessions / appointments / events** — variable rates that can't be predicted by the cascade. Flag for manual review only; do NOT validate rate.
+- **Private sessions** — a Details value containing `private` paired with a pay
+  rate containing `Private` is correct and must pass as valid. A Private session
+  with a blank or non-Private rate is flagged for manual review; do not auto-fix
+  it through the class-rate cascade.
+- **Appointments / events** — variable rates that can't be predicted by the
+  cascade. Flag for manual review only, except for the valid Private-session /
+  Private-rate pairing above; do NOT otherwise validate their rates.
 - **`Hourly` pay rate** — non-class compensation (subbing / coverage / admin time), not a class. Always valid; never flag against the class-rate cascade, whatever the row's details say.
 
 ### Ordering rationale and tie-breakers
@@ -46,6 +53,9 @@ intentional spec/implementation duplication in the repo.
 - Stream beats Aerial. A hybrid aerial class (if any exist) would get Hybrid Rate, not Aerial Rate.
 - Aerial beats length rules. `EDGEWTR: Aerial` gets Aerial Rate, not 45-60 or 75 min — location prefix doesn't preclude aerial.
 - Ashtanga beats generic length rules. Ashtanga should use `75-90 minute In-Person Class (500 ERYT)`.
+- A Radiance Flow definition without `75` uses the normal 45-60 minute rate. A
+  Radiance Flow definition containing `75` skips that rule and uses the generic
+  75-minute rate.
 
 ---
 
